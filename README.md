@@ -45,6 +45,8 @@ Now once we have the sampled, annotated frames, from the ground truth; we can tr
    cd diversity-sampling-project
 
 pip install -r requirements.txt
+if permission error, use:
+pip install --user -r requirements.txt
 
 python scripts/run_sampling.py --method fvi --data_path data/examples/example_dataset1.csv
 
