@@ -1,7 +1,11 @@
-numpy
+numpy==1.26.4
 scikit-learn
 matplotlib
 torch
 torchvision
 pillow
 fiftyone
+opencv-python
+seaborn
+umap-learn
+pycocotools
