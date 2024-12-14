@@ -174,3 +174,113 @@ def convert_selected_frames_to_coco(selected_frames, output_file_path):
         json.dump(coco_output, f)
 
     print(f"COCO file created at: {output_file_path}")
+
+
+
+
+def convert_selected_images_to_coco(selected_images, output_file_path):
+    coco_annotations = []
+    coco_images = []
+    coco_categories = {}
+    c = 0  # Counter for unique annotation IDs
+
+    for image_path in selected_images:
+        # Normalize path for cross-platform compatibility
+        frame_path = image_path.replace("\\", "/")
+        # need to get the frame path for image path
+        frame_path = image_path.replace('/output/video_frames', '/data/ground_truth') 
+        frame_path = frame_path.replace('.jpg', '.json')
+        #need to add preds to the path
+
+        # Insert 'preds' into the path before the JSON file
+        # Assuming the structure is something like: /data/ground_truth/<subdir>/<file>.json
+        path_parts = frame_path.split('/')
+        
+        # Find the index where 'preds' should be inserted, typically right before the last two parts
+        if len(path_parts) > 2:
+            path_parts.insert(-1, 'preds')  # Insert 'preds' two positions before the end
+        
+        # Reconstruct the path with 'preds' included
+        frame_path_with_preds = '/'.join(path_parts)
+        frame_path = frame_path_with_preds
+
+        coco_categories = {category["name"]: category for category in categories}
+
+        # Extract frame information
+        framename = os.path.basename(frame_path).split('.')[0]  # Extract file name without extension
+        frame_num = framename.split('_')[-1]  
+        with open(frame_path, 'r') as f:
+            result = json.load(f)
+
+        # Check if required keys exist in the JSON file
+        if 'labels' in result and 'bboxes' in result and 'scores' in result and 'masks' in result:
+            labels = result['labels']
+            bboxes = result['bboxes']
+            scores = result['scores']
+            masks = result['masks']
+
+            for i, label in enumerate(labels):
+                data = dict()
+                data['image_id'] = image_path#int(frame_num)
+
+                # Convert bounding box to COCO format: [x_min, y_min, width, height]
+                x1 = bboxes[i][0]
+                y1 = bboxes[i][1]
+                x2 = bboxes[i][2]
+                y2 = bboxes[i][3]
+                coco_bbox = [x1, y1, x2 - x1, y2 - y1]
+                data['bbox'] = list(int(np.round(x)) for x in coco_bbox)
+                
+                # Add score and filter by threshold
+                data['score'] = float(scores[i])
+                if data['score'] <= 0.7:
+                    continue
+
+                # Map category ID using the folder name
+                data['category_id'] = categories[label]["id"]
+
+                data['tags'] =  [str([categories[label]["id"]])]
+                
+                # Handle segmentation masks
+                if isinstance(masks[i]['counts'], bytes):
+                    masks[i]['counts'] = masks[i]['counts'].decode()
+                data['segmentation'] = masks[i]
+
+                data['id'] = c + 1  # Unique annotation ID
+                c += 1
+                data["iscrowd"] = 0
+
+                coco_annotations.append(data)
+
+            # Add image metadata to coco_images
+            coco_image = {
+                "id": image_path,#int(frame_num),
+                "width": 1920,  # Assuming fixed dimensions; adjust if necessary
+                "height": 1080,
+                "file_name": image_path,#framename + '.jpg',
+                "metadata": categories[label]["id"],  # Include full metadata if needed
+            }
+            coco_images.append(coco_image)
+
+    # Create COCO dictionary structure
+    print(coco_images)
+    coco_output = {
+        "info": {
+            "description": "COCO dataset generated from selected images",
+        },
+        "images": coco_images,
+        "annotations": coco_annotations,
+        "categories": list(coco_categories.values()),  # Convert categories dict to list
+    }
+
+    # create .json fiel containing all images as
+
+    # Save the output to the specified JSON file
+    os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+    with open(output_file_path, 'w') as f:
+        json.dump(coco_output, f)
+
+    print(f"COCO file created at: {output_file_path}")
+
+
+    
