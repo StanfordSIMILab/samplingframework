@@ -39,7 +39,7 @@ def process_video(video_path, video_output_dir):
 
     # Release the video capture object
     cap.release()
-    print(f"Extracted {saved_count - 1} frames from {video_path} at {frame_interval} fps.")
+    print(f"Extracted {saved_count - 1} frames from {video_path}")
 
 def process_all_videos(input_dir, output_dir):
     """
