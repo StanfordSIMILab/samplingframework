@@ -30,7 +30,7 @@ def process_video(video_path, video_output_dir):
             break
         
         # Only save frames at the specified interval
-        if frame_count % frame_interval == 0:
+        if frame_count % 3 == 0:
             filename = os.path.join(video_output_dir, f"{saved_count:04d}.jpg")
             cv2.imwrite(filename, frame)  # Save the frame as a JPEG file
             saved_count += 1
