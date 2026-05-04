@@ -106,26 +106,28 @@ class DiversitySampling:
         print(f"Loaded data (shape={self.data_array.shape})")
 
     def run_dino(self):
-        if self.emb_prev is None:
-            transform = T.Compose(
-                [
-                    T.ToPILImage(),
-                    T.Resize((518, 518)),
-                    T.ToTensor(),
-                    T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-                ]
-            )
+        # Bug fix: emb_prev for dino is already the processed CLS-token array,
+        # not a list of raw forward_features dicts — skip extraction if cached.
+        if self.emb_prev is not None:
+            self.all_emb = self.emb_prev
+            return
 
-            with torch.no_grad():
-                all_out = []
-                for i, n in enumerate(self.data_array):
-                    print(f"{i}/ {len(self.data_array)}")
-                    transformed_img = transform(n).to(self.device)
-                    out = self.model.forward_features(transformed_img[np.newaxis, :])
-                    all_out.append(out)
-            all_out = np.array(all_out)
-        else:
-            all_out = self.emb_prev
+        transform = T.Compose(
+            [
+                T.ToPILImage(),
+                T.Resize((518, 518)),
+                T.ToTensor(),
+                T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ]
+        )
+
+        with torch.no_grad():
+            all_out = []
+            for i, n in enumerate(self.data_array):
+                print(f"{i}/ {len(self.data_array)}")
+                transformed_img = transform(n).to(self.device)
+                out = self.model.forward_features(transformed_img[np.newaxis, :])
+                all_out.append(out)
 
         all_emb = []
         for out in all_out:
@@ -133,20 +135,21 @@ class DiversitySampling:
         self.all_emb = np.array(all_emb).squeeze(1)
 
     def run_openclip(self):
-        if self.emb_prev is None:
-            all_emb = []
-            with torch.no_grad():
-                for i, frame in enumerate(self.data_array):
-                    print(f"{i}/ {len(self.data_array)}")
-                    img = Image.fromarray(frame.astype(np.uint8))
-                    img_tensor = (
-                        self.openclip_preprocess(img).unsqueeze(0).to(self.device)
-                    )
-                    features = self.model.encode_image(img_tensor)
-                    all_emb.append(features.cpu().numpy())
-            self.all_emb = np.concatenate(all_emb, axis=0)
-        else:
+        if self.emb_prev is not None:
             self.all_emb = self.emb_prev
+            return
+
+        all_emb = []
+        with torch.no_grad():
+            for i, frame in enumerate(self.data_array):
+                print(f"{i}/ {len(self.data_array)}")
+                img = Image.fromarray(frame.astype(np.uint8))
+                img_tensor = (
+                    self.openclip_preprocess(img).unsqueeze(0).to(self.device)
+                )
+                features = self.model.encode_image(img_tensor)
+                all_emb.append(features.cpu().numpy())
+        self.all_emb = np.concatenate(all_emb, axis=0)
 
     def run_dbscan(self, epsilon=None, min_samples=5):
         if epsilon is None:
@@ -174,11 +177,11 @@ class DiversitySampling:
         print(f"Finished fitting DBSCAN: {n_clusters} clusters, {n_noise} noise points")
 
         self.cluster_labels = cluster_labels
+        self.n_clusters = n_clusters  # bug fix: was never set
 
         if self.viz_clusters:
             pca = PCA(n_components=2)
             out = pca.fit_transform(self.all_emb)
-
             plt.scatter(x=out[:, 0], y=out[:, 1], c=cluster_labels)
             plt.title("Embedding Scatter Plot (PC decomp)")
             plt.show()
@@ -191,12 +194,10 @@ class DiversitySampling:
         m = self.n_samples_per_cluster
 
         closest_points = {}
-
         for centroid, cluster_id in zip(centroids, unique_labels):
             distances = np.linalg.norm(self.all_emb - centroid, axis=1)
             closest_indices = np.argsort(distances)[:m]
             closest_points[cluster_id] = closest_indices
-
         self.closest_points = closest_points
 
     def run_hdbscan(self, min_cluster_size=10, min_samples=None):
@@ -212,6 +213,7 @@ class DiversitySampling:
         print(f"HDBSCAN: {n_clusters} clusters, {n_noise} noise points")
 
         self.cluster_labels = cluster_labels
+        self.n_clusters = n_clusters  # bug fix: was never set
 
         if self.viz_clusters:
             pca = PCA(n_components=2)
@@ -242,7 +244,7 @@ class DiversitySampling:
 
     def run_knn(self):
         if self.optimize_clusters == True:
-            k_values = range(1, 50)
+            k_values = range(2, 50)
             inertia_values = []
             for k in k_values:
                 kmeans = KMeans(n_clusters=k, random_state=0, n_init="auto")
@@ -253,7 +255,8 @@ class DiversitySampling:
             knee_locator = KneeLocator(
                 k_values, inertia_values, curve="convex", direction="decreasing"
             )
-            optimal_k = knee_locator.knee
+            # bug fix: knee can be None if KneeLocator finds no clear elbow
+            optimal_k = knee_locator.knee if knee_locator.knee is not None else 10
 
             plt.figure(figsize=(8, 5))
             plt.plot(k_values, inertia_values, marker="o", linestyle="--")
@@ -279,7 +282,6 @@ class DiversitySampling:
         if self.viz_clusters:
             pca = PCA(n_components=2)
             out = pca.fit_transform(self.all_emb)
-
             plt.scatter(x=out[:, 0], y=out[:, 1], c=cluster_labels)
             plt.title("Embedding Scatter Plot (PC decomp)")
             plt.show()
@@ -289,12 +291,10 @@ class DiversitySampling:
         m = self.n_samples_per_cluster
 
         closest_points = {}
-
         for cluster_id, centroid in enumerate(centroids):
             distances = np.linalg.norm(self.all_emb - centroid, axis=1)
             closest_indices = np.argsort(distances)[:m]
             closest_points[cluster_id] = closest_indices
-
         self.closest_points = closest_points
 
     def run_knn_km_version(self, n_components=64, k_max=50, min_k=2, reduce_dims=True):
@@ -372,7 +372,8 @@ class DiversitySampling:
                 plt.show()
 
         self.all_indices = all_indices
-        return self.data_array[all_indices]
+        self.chosen_frames = self.data_array[all_indices]
+        return self.chosen_frames
 
     def pairwise_separation(self, X, metric):
         D = pairwise_distances(X, metric=metric)
@@ -651,9 +652,76 @@ class DiversitySampling:
         plt.tight_layout()
         plt.show()
 
-    def export_frames(self, chosen_frames, out_folder_name):
+    def filter_clusters_manually(self):
+        unique_labels = [l for l in np.unique(self.cluster_labels) if l != -1]
+        print(f"\nCurrent clusters: {unique_labels}  (n={len(unique_labels)})")
+
+        # Step 1: optionally re-cluster with a new k
+        new_k = None
+        while True:
+            raw = input(
+                "Re-cluster with new k (enter integer, or Enter to keep current): "
+            ).strip()
+            if raw == "":
+                break
+            try:
+                new_k = int(raw)
+                if new_k < 2:
+                    print("  k must be >= 2.")
+                    new_k = None
+                    continue
+                break
+            except ValueError:
+                print("  Enter an integer.")
+
+        if new_k is not None:
+            print(f"Re-clustering into k={new_k}...")
+            kmeans = KMeans(n_clusters=new_k, random_state=0, n_init="auto")
+            self.cluster_labels = kmeans.fit_predict(self.all_emb)
+            self.centroids = kmeans.cluster_centers_
+            self.n_clusters = new_k
+            m = self.n_samples_per_cluster
+            closest_points = {}
+            for cluster_id, centroid in enumerate(self.centroids):
+                distances = np.linalg.norm(self.all_emb - centroid, axis=1)
+                closest_points[cluster_id] = np.argsort(distances)[:m]
+            self.closest_points = closest_points
+            unique_labels = list(range(new_k))
+            print(f"  Done. New clusters: {unique_labels}")
+
+        # Step 2: remove specific clusters
+        while True:
+            raw = input(
+                "Clusters to remove (comma-separated IDs, or Enter to skip): "
+            ).strip()
+            if raw == "":
+                clusters_to_remove = []
+                break
+            try:
+                clusters_to_remove = [int(x.strip()) for x in raw.split(",") if x.strip()]
+                bad = [c for c in clusters_to_remove if c not in unique_labels]
+                if bad:
+                    print(f"  Not found: {bad}. Valid: {unique_labels}")
+                    continue
+                break
+            except ValueError:
+                print("  Enter integers separated by commas.")
+
+        if clusters_to_remove:
+            for cid in clusters_to_remove:
+                self.closest_points.pop(cid, None)
+                self.cluster_labels[self.cluster_labels == cid] = -1
+            remaining = [l for l in np.unique(self.cluster_labels) if l != -1]
+            self.centroids = np.array(
+                [self.all_emb[self.cluster_labels == l].mean(axis=0) for l in remaining]
+            )
+            self.n_clusters = len(remaining)
+            print(f"Removed {clusters_to_remove}. Remaining clusters: {remaining}")
+
+    def export_frames(self, out_folder_name):
         os.makedirs(out_folder_name, exist_ok=True)
 
+        chosen_frames = self.chosen_frames
         n = chosen_frames.shape[0]
 
         for i in range(n):
@@ -675,6 +743,7 @@ class DiversitySampling:
             self.run_dino()
         elif self.emb_model == "openclip":
             self.run_openclip()
+
         if method == "hdbscan":
             self.run_hdbscan(**kwargs)
         elif method == "dbscan":
@@ -684,17 +753,19 @@ class DiversitySampling:
         elif method == "kmeans_sil":
             self.run_knn_km_version(**kwargs)
 
-        filtered_frames = self.filter_frames()
-        if export is not None:
-            self.export_frames(filtered_frames, export)
-
-        np.save("last_embeddings.npy", self.all_emb)
-        np.save(self.save_path, self.data_array)
-
         if eval:
             self.eval_iso(include_outliers=True)
             self.eval_tightness()
             self.evaluate(n=eval4_n)
+            self.filter_clusters_manually()
+
+        filtered_frames = self.filter_frames()
+
+        if export is not None:
+            self.export_frames(export)
+
+        np.save("last_embeddings.npy", self.all_emb)
+        np.save(self.save_path, self.data_array)
 
         return (
             filtered_frames,

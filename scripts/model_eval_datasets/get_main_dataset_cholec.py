@@ -38,14 +38,14 @@ N_VAL = 1000
 # np.save("val_frames.npy", val_frames)
 # np.save("val_masks.npy", val_masks)
 
-train_frames = np.load("train_frames.npy")
-train_masks = np.load("train_masks.npy")
-val_frames = np.load("val_frames.npy")
-val_masks = np.load("val_masks.npy")
+train_frames = np.load("scripts/model_eval_datasets/data/input/train_frames.npy")
+train_masks = np.load("scripts/model_eval_datasets/data/input/train_masks.npy")
+val_frames = np.load("scripts/model_eval_datasets/data/input/val_frames.npy")
+val_masks = np.load("scripts/model_eval_datasets/data/input/val_masks.npy")
 
 n_train = train_frames.shape[0]
 
-emb_prev = np.load("last_embeddings.npy")
+emb_prev = np.load("scripts/model_eval_datasets/data/input/last_embeddings.npy")
 
 ### sample frames
 sampler = DiversitySampling(
@@ -62,8 +62,8 @@ sampler = DiversitySampling(
     save_path="cholec_diverse_sampled_frames.npy" # also saves embeddings as last_embeddings.npy implicitly
 )
     
-frames, n_clusters, n_per_cluster, all_indices = sampler.forward(eval=True, method="kmeans", export="mvd_knn_openclip", min_k=5, reduce_dims=True)
-np.save("all_chosen_indices_diverse.npy", all_indices)        
+frames, n_clusters, n_per_cluster, all_indices = sampler.forward(eval=True, method="kmeans", export="scripts/model_eval_datasets/data/output", min_k=5, reduce_dims=True)
+np.save("scripts/model_eval_datasets/data/output/all_chosen_indices_diverse.npy", all_indices)        
 
 n_frames_sampled = n_clusters * n_per_cluster
 
@@ -71,8 +71,8 @@ random_sample = np.random.choice(n_train, size=n_frames_sampled, replace=False)
 random_frames = train_frames[random_sample]
 random_masks = train_masks[random_sample]
 
-np.save("random_sample_frames.npy", random_frames)
-np.save("random_sample_masks.npy", random_masks)
-np.save("diverse_sampled_masks.npy", train_masks[all_indices])
-np.save("diverse_sampled_frames.npy", train_frames[all_indices])
+np.save("scripts/model_eval_datasets/data/output/random_sample_frames.npy", random_frames)
+np.save("scripts/model_eval_datasets/data/output/random_sample_masks.npy", random_masks)
+np.save("scripts/model_eval_datasets/data/output/diverse_sampled_masks.npy", train_masks[all_indices])
+np.save("scripts/model_eval_datasets/data/output/diverse_sampled_frames.npy", train_frames[all_indices])
 

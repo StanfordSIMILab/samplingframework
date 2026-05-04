@@ -13,3 +13,5 @@ env/
 
 /data/*
 /output/*
+scripts/model_eval_datasets/data
+C:\Users\krsid\Documents\samplingframework\scripts\__pycache__
