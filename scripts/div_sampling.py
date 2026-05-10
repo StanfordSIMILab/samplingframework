@@ -81,11 +81,10 @@ class DiversitySampler:
 
     def _n_for_cluster(self, num_train, cluster_labels, cluster_id):
         """
-        If proportional_sampling=True, each cluster gets a share of
-        n_samples_per_cluster proportional to its size relative to the
-        total number of (non-noise) samples. Minimum 1 per cluster.
-        If proportional_sampling=False, every cluster gets the flat
-        n_samples_per_cluster value (original behaviour).
+        If proportional_sampling=True, each cluster gets a proportional
+        number of samples matching up to approximately the number of samples
+        determined from either the user's selected num_train or percent train.
+        If proportional_sampling=False, use the sampler default n_samples_per_cluster
         """
         if not self.proportional_sampling:
             return self.n_samples_per_cluster 
@@ -738,11 +737,11 @@ class DiversitySampler:
 
             pil_img.save(os.path.join(out_folder_name, f"{i:06d}.png"))
 
-    def create_dataset(self, data_arr=None, data_dir=None, extract_vid=True, per_train = 0.1, emb_model=None, method=None, run_eval=True, eval4_n=10, out_dir=None):
+    def create_dataset(self, data_arr=None, data_dir=None, extract_vid=False, num_train=None, per_train = 0.1, emb_model=None, method=None, run_eval=True, eval4_n=10, out_dir=None):
         """
-            create full dataset from scratch taking in data_dir of video 
-                                                                or frames
-                                                       np data array of frames
+            Select training frames from scratch taking in: data_dir of video 
+                                                           "         " frames
+                                                           np data array of training frames
 
         """
 
@@ -757,7 +756,7 @@ class DiversitySampler:
             data_arr = self.get_frames_from_mp4(data_dir)
         elif data_arr is None:
             data_arr = []
-            excluded = {"masks", "annotations"}
+            excluded = {"masks", "annotations", "mask", "val", "validation", "test"}
             for frame in sorted(data_dir.rglob("*")):
                 if any(exc in part for part in frame.parts for exc in excluded):
                     continue
@@ -774,7 +773,8 @@ class DiversitySampler:
                 "Error in dataset creation, please make sure to input a correct data_dir or numpy data array"
             )
         
-        num_train = int(len(data_arr) * per_train)
+        if num_train is None:
+            num_train = int(len(data_arr) * per_train)
 
         #Allow override of embed_model for specific dataset creation, otherwise default to default method
         if emb_model is None:
