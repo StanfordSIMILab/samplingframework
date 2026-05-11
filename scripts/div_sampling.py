@@ -411,6 +411,7 @@ class DiversitySampler:
         plt.show()
         plt.close()
 
+        centroid_pdist = None
         if len(centroids) > 1:
             centroid_pdist, avg_centroid_dist = self.pairwise_separation(
                 centroids, metric="manhattan"
@@ -618,9 +619,9 @@ class DiversitySampler:
                 dists = np.linalg.norm(all_emb[cluster_indices] - centroid, axis=1)
                 closest_idx = cluster_indices[np.argmin(dists)]
                 plt.imshow(data_arr[closest_idx])
-                plt.title(f"Cluster {cid} — frame idx {closest_idx}")
+                plt.title(f"Cluster{cid}_frame_idx{closest_idx}")
                 plt.axis("off")
-                plt.savefig(f"{self.save_path}/Cluster {cid} — frame idx {closest_idx}", bbox_inches='tight')
+                plt.savefig(f"{self.save_path}/cluster_{cid}_frame_{closest_idx}.png", bbox_inches='tight')
                 plt.show()
                 plt.close()
             except ValueError:
@@ -755,6 +756,7 @@ class DiversitySampler:
         if data_arr is None and extract_vid:
             data_arr = self.get_frames_from_mp4(data_dir)
         elif data_arr is None:
+            data_dir = Path(data_dir)
             data_arr = []
             excluded = {"masks", "annotations", "mask", "val", "validation", "test"}
             for frame in sorted(data_dir.rglob("*")):
@@ -768,7 +770,7 @@ class DiversitySampler:
             data_arr = np.array(data_arr)
 
         # Make sure data array was created properly before preceeding
-        if data_arr is None:
+        if data_arr is None or len(data_arr) == 0:
             raise ValueError(
                 "Error in dataset creation, please make sure to input a correct data_dir or numpy data array"
             )
