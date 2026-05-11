@@ -52,7 +52,7 @@ class DiversitySampler:
 
         if self.emb_model is None:
             raise ValueError(
-                "Please provide an embedding model for clustering, choose 'dino' or 'openclip'."
+                "Please provide a correct embedding model for clustering, choose 'dino' or 'openclip'."
             )
         elif self.emb_model == "dino":
             # shutil.rmtree(r"C:\Users\krsid\.cache\torch\hub\facebookresearch_dinov2_main", ignore_errors=True)
@@ -76,7 +76,7 @@ class DiversitySampler:
         
         if self.method is None:
             raise ValueError(
-                "Please provide a default clustering method, choose 'hbdscan', 'dbscan', 'kmeans_elbow' or 'kmeans_sil'."
+                "Please provide a correct default clustering method, choose 'hbdscan', 'dbscan', 'kmeans_elbow' or 'kmeans_sil'."
             )
 
     def _n_for_cluster(self, num_train, cluster_labels, cluster_id):
@@ -774,11 +774,12 @@ class DiversitySampler:
             raise ValueError(
                 "Error in dataset creation, please make sure to input a correct data_dir or numpy data array"
             )
-        
+
+        # If num_train not specified, use per_train to determine approximate number of training samples to select
         if num_train is None:
             num_train = int(len(data_arr) * per_train)
 
-        #Allow override of embed_model for specific dataset creation, otherwise default to default method
+        # Allow override of embed_model for dataset creation, otherwise default to the initialized preferred method
         if emb_model is None:
             if self.emb_model == "dino":
                 all_emb = self.run_dino(data_arr)
@@ -791,9 +792,10 @@ class DiversitySampler:
                 all_emb = self.run_openclip(data_arr)
             else:
                 raise ValueError(
-                "No correct emb_model specified in function call or DiversitySampler, Choose 'dino' or 'openclip'."
+                    "Must specify a valid embedding model in function call to override default, Choose 'dino' or 'openclip'."
                 )
 
+        # Allow override of clustering method for dataset creation, otherwise default to the initialized preferred method
         if method is None:
             if self.method == "hdbscan":
                 n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(all_emb, num_train)
@@ -813,13 +815,16 @@ class DiversitySampler:
             elif method == "kmeans_sil":
                 n_clusters, cluster_labels, centroids, closest_points = self.run_knn(all_emb, num_train)
             else:
-                raise ValueError("No correct clustering method specified in function call or DiversitySampler, Choose 'hbdscan', 'dbscan', 'kmeans_elbows', 'kmeans_sil'.")
+                raise ValueError("Must specify a valid clustering method in function call to override default, Choose 'hbdscan', 'dbscan', 'kmeans_elbows', 'kmeans_sil'.")
 
+        # Run dataset quality evaluation 
         if run_eval:
             self.eval_iso(data_arr=data_arr, all_emb=all_emb, cluster_labels=cluster_labels, 
                           centroids=centroids, include_outliers=True)
             self.eval_tightness(all_emb, cluster_labels, centroids)
-            self.evaluate(data_arr, all_emb, cluster_labels, centroids, n=eval4_n)
+            self.evaluate(data_arr=data_arr, all_emb=all_emb, cluster_labels=cluster_labels, centroids=centroids, n=eval4_n)
+            
+            # Optional user specified manual clustering after analysis of the dataset evaluation metrics
             n_clusters, all_emb, cluster_labels, centroids, closest_points = self.filter_clusters_manually(all_emb, num_train, cluster_labels, centroids, closest_points)
 
         filtered_frames, all_indices = self.filter_frames(data_arr, closest_points)
@@ -836,7 +841,7 @@ class DiversitySampler:
             "all_indices": [int(i) for i in all_indices],
 
         }
-        metadata_path = os.path.join(self.save_path, "metadata.json")
+        metadata_path = os.path.join(self.save_path, "training_metadata.json")
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
