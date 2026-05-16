@@ -1,12 +1,15 @@
 from pathlib import Path
+from typing import Union
 import cv2
 import tempfile, os
+import re
 import json
 import threading
 
 import numpy as np
 import torch
 import torchvision.transforms as T
+import open_clip
 from PIL import Image
 import shutil
 from kneed import KneeLocator
@@ -20,6 +23,227 @@ from skimage.metrics import structural_similarity as ssim
 from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 from scipy.stats import chi2
+
+#Helper function to used to sort colors by brightness
+def luminance(rgb):
+    r, g, b = rgb
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+# Helper function to split dataset into train-val-test splits and save as .npy files
+def train_val_test_split(
+    data_arr: np.ndarray,
+    test_size: float = 0.1,
+    val_size: float = 0.1,
+    out_folder: str = ".",
+    mask_arr: np.ndarray | None = None,
+    shuffle: bool = True,
+    seed: int = 42,
+):
+    """
+    Split data_arr (and optionally mask_arr) into train/val/test splits and
+    save each as a .npy file in <out_folder>/{train,val,test}/.
+ 
+    Parameters
+    ----------
+    data_arr    : (N, H, W, C) uint8 frames
+    test_size   : fraction of data held out for test
+    val_size    : fraction of data held out for validation
+    out_folder  : root directory; sub-folders train/val/test are created inside
+    mask_arr    : optional (N, H, W) or (N, H, W, C) mask array, split in parallel
+    shuffle     : whether to shuffle before splitting
+    seed        : random seed for reproducibility
+    """
+    n = len(data_arr)
+    indices = np.arange(n)
+ 
+    if shuffle:
+        rng = np.random.default_rng(seed)
+        rng.shuffle(indices)
+ 
+    n_test = max(1, int(np.floor(n * test_size)))
+    n_val  = max(1, int(np.floor(n * val_size)))
+    n_train = n - n_test - n_val
+ 
+    if n_train <= 0:
+        raise ValueError(
+            f"test_size={test_size} + val_size={val_size} leaves no training samples "
+            f"for a dataset of {n} frames."
+        )
+ 
+    train_idx = indices[:n_train]
+    val_idx   = indices[n_train : n_train + n_val]
+    test_idx  = indices[n_train + n_val :]
+ 
+    splits = {"train": train_idx, "val": val_idx, "test": test_idx}
+ 
+    for split_name, idx in splits.items():
+        split_dir = os.path.join(out_folder, split_name)
+        os.makedirs(split_dir, exist_ok=True)
+ 
+        frames_split = data_arr[idx]
+        np.save(os.path.join(split_dir, "frames.npy"), frames_split)
+ 
+        if mask_arr is not None:
+            masks_split = mask_arr[idx]
+            np.save(os.path.join(split_dir, "masks.npy"), masks_split)
+ 
+        # Also save the indices so the caller can trace back to original frames
+        np.save(os.path.join(split_dir, "indices.npy"), idx)
+ 
+    print(f"\nSplit summary: train={len(train_idx)}  val={len(val_idx)}  test={len(test_idx)}")
+    return train_idx, val_idx, test_idx
+
+# Helper function to parse different mask types
+def parse_dataset_with_masks(
+        dataset_root: str | os.PathLike = ".",
+        mask_type: str = "color_mask",          # "color_mask" | "mask" | "watershed_mask"
+        target_size: tuple[int, int] | None = (224, 224),  # (H, W); None keeps original
+        videos: list[str] | None = None,        # e.g. ["video01", "video09"]; None = all
+        dataset_style: str = "cholec",          # "cholec" | "flat" | "nested"
+        force_color_processing: bool = False,   # treat mask as RGB even if mask_type != "color_mask"
+        global_color_map: dict | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+
+    dataset_root = Path(dataset_root)
+    if not dataset_root.exists():
+        raise FileNotFoundError(f"Dataset root not found: {dataset_root}")
+
+    load_as_rgb = mask_type == "color_mask" or force_color_processing
+    mask_mode = "RGB" if load_as_rgb else "L"
+    excluded = {"masks", "annotations", "mask"}
+
+    # ------------------------------------------------------------------ #
+    # Collect frame paths based on dataset style
+    # ------------------------------------------------------------------ #
+    frame_paths = []
+
+    if dataset_style == "cholec":
+        video_dirs = sorted(
+            d for d in dataset_root.iterdir()
+            if d.is_dir() and (videos is None or d.name in videos)
+        )
+        if not video_dirs:
+            raise FileNotFoundError(f"No video folders found under {dataset_root}")
+        for video_dir in video_dirs:
+            print(f"Scanning {video_dir.name}...")
+            for sample_dir in sorted(video_dir.iterdir()):
+                if sample_dir.is_dir():
+                    for f in sorted(sample_dir.iterdir()):
+                        if any(exc in part for part in f.parts for exc in excluded):
+                            continue
+                        if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                            frame_paths.append(f)
+
+    elif dataset_style == "flat":
+        for f in sorted(dataset_root.iterdir()):
+            if any(exc in part for part in f.parts for exc in excluded):
+                continue
+            if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                frame_paths.append(f)
+
+    elif dataset_style == "nested":
+        subdirs = sorted(
+            d for d in dataset_root.iterdir()
+            if d.is_dir() and (videos is None or d.name in videos)
+            and not any(exc in d.name.lower() for exc in excluded)
+        )
+        if not subdirs:
+            raise FileNotFoundError(f"No subfolders found under {dataset_root}")
+        for subdir in subdirs:
+            print(f"Scanning {subdir.name}...")
+            for f in sorted(subdir.iterdir()):
+                if any(exc in part for part in f.parts for exc in excluded):
+                    continue
+                if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    frame_paths.append(f)
+
+    else:
+        raise ValueError(
+            f"Unknown dataset_style '{dataset_style}'. Choose 'cholec', 'flat', or 'nested'."
+        )
+
+    if not frame_paths:
+        raise FileNotFoundError(
+            f"No image frames found under {dataset_root} with style='{dataset_style}'"
+        )
+
+    print(f"Found {len(frame_paths)} frames.")
+
+    # ------------------------------------------------------------------ #
+    # Determine output array shapes
+    # ------------------------------------------------------------------ #
+    if target_size is not None:
+        h, w = target_size
+    else:
+        h, w = Image.open(frame_paths[0]).size[::-1]
+
+    n = len(frame_paths)
+    frames = np.empty((n, h, w, 3), dtype=np.uint8)
+    masks  = np.empty((n, h, w, 3 if load_as_rgb else 1), dtype=np.uint8)
+
+    missing_masks = []
+
+    # ------------------------------------------------------------------ #
+    # Load frames and masks
+    # ------------------------------------------------------------------ #
+    for i, frame_path in enumerate(frame_paths):
+        print(f"Loading frame {i+1}/{n}", end="\r", flush=True)
+
+        mask_name = f"{frame_path.stem}_{mask_type}.png"
+        mask_path = frame_path.parent / mask_name
+
+        if not mask_path.exists():
+            missing_masks.append(str(mask_path))
+            continue
+
+        frame_img = Image.open(frame_path).convert("RGB")
+        mask_img  = Image.open(mask_path).convert(mask_mode)
+
+        if target_size is not None:
+            frame_img = frame_img.resize((w, h), Image.BILINEAR)
+            mask_img  = mask_img.resize((w, h), Image.NEAREST)
+
+        frames[i] = np.array(frame_img, dtype=np.uint8)
+        mask_np   = np.array(mask_img, dtype=np.uint8)
+        masks[i]  = mask_np if mask_np.ndim == 3 else mask_np[..., np.newaxis]
+
+    if missing_masks:
+        raise FileNotFoundError(
+            f"{len(missing_masks)} mask(s) not found. First missing:\n  {missing_masks[0]}"
+        )
+
+    print(f"\nFinished loading {n} frames.")
+
+    # ------------------------------------------------------------------ #
+    # Convert color masks → class index arrays
+    # ------------------------------------------------------------------ #
+    color_map = {}
+    if load_as_rgb:
+        if global_color_map is None:
+            N, H, W, _ = masks.shape
+            flat = masks.reshape(-1, 3)
+            unique_colors = np.unique(flat, axis=0)
+            unique_colors = sorted(unique_colors, key=luminance)
+            global_color_map = {
+                idx: list(color)
+                for idx, color in enumerate(unique_colors)
+            }
+
+        rgb_to_cls = {tuple(color): idx for idx, color in global_color_map.items()}
+        N, H, W, _ = masks.shape
+        flat = masks.reshape(-1, 3)
+        flat_out = np.zeros(flat.shape[0], dtype=np.uint8)
+        for rgb_tuple, cls in rgb_to_cls.items():
+            flat_out[np.all(flat == np.array(rgb_tuple), axis=1)] = cls
+        masks = flat_out.reshape(N, H, W)
+        color_map = global_color_map
+        print(f"Finished processing masks. Unique classes found: {len(color_map)}")
+    else:
+        masks = masks.squeeze(-1)
+        unique_vals = np.unique(masks)
+        print(f"Finished processing masks. Unique values found: {unique_vals}")
+
+    return frames, masks, color_map
 
 class DiversitySampler:
     def __init__(
@@ -61,8 +285,6 @@ class DiversitySampler:
             )
             self.model.eval().to(self.device)
         elif self.emb_model == "openclip":
-            import open_clip
-
             self.model, _, self.openclip_preprocess = (
                 open_clip.create_model_and_transforms(
                     openclip_model_string, pretrained=openclip_pretrained
@@ -138,7 +360,6 @@ class DiversitySampler:
         with torch.no_grad():
             all_out = []
             for i, n in enumerate(data_arr):
-                print(f"{i}/ {len(data_arr)}")
                 transformed_img = transform(n).to(self.device)
                 out = self.model.forward_features(transformed_img[np.newaxis, :])
                 all_out.append(out)
@@ -146,21 +367,22 @@ class DiversitySampler:
         all_emb = []
         for out in all_out:
             all_emb.append(out["x_norm_clstoken"])
-        
+
+        print(f"Extracted DINO embeddings for {len(all_emb)} frames, each of shape {all_emb[0].shape}")
         return np.array(all_emb).squeeze(1)
 
     def run_openclip(self, data_arr):
         all_emb = []
         with torch.no_grad():
             for i, frame in enumerate(data_arr):
-                print(f"{i}/ {len(data_arr)}")
                 img = Image.fromarray(frame.astype(np.uint8))
                 img_tensor = (
                     self.openclip_preprocess(img).unsqueeze(0).to(self.device)
                 )
                 features = self.model.encode_image(img_tensor)
                 all_emb.append(features.cpu().numpy())
-        
+
+        print(f"Extracted OpenCLIPembeddings for {len(all_emb)} frames, each of shape {all_emb[0].shape}")
         return np.concatenate(all_emb, axis=0)
 
     def run_dbscan(self, all_emb, num_train, epsilon=None, min_samples=5):
@@ -274,10 +496,10 @@ class DiversitySampler:
                     km = KMeans(n_clusters=k, random_state=0, n_init="auto")
                     km.fit(all_emb)
                     scores.append(km.inertia_)
-                    print(f"k={k}  inertia={scores[-1]:.2f}")
 
                 knee_locator = KneeLocator(k_range, scores, curve="convex", direction="decreasing")
                 optimal_k = knee_locator.knee if knee_locator.knee is not None else 10
+                print("KMeans inertias:", dict(zip(k_range, scores)))
 
                 plt.figure(figsize=(8, 5))
                 plt.plot(list(k_range), scores, marker="o", linestyle="--")
@@ -290,9 +512,9 @@ class DiversitySampler:
                 for k in k_range:
                     labels = KMeans(n_clusters=k, random_state=0, n_init="auto").fit_predict(all_emb)
                     scores.append(silhouette_score(all_emb, labels))
-                    print(f"k={k}  silhouette={scores[-1]:.4f}")
 
                 optimal_k = list(k_range)[int(np.argmax(scores))]
+                print("Silhouette scores:", dict(zip(k_range, scores)))
 
                 plt.figure(figsize=(8, 5))
                 plt.plot(list(k_range), scores, marker="o", linestyle="--")
@@ -335,7 +557,7 @@ class DiversitySampler:
             distances = np.linalg.norm(all_emb - centroid, axis=1)
             closest_points[cluster_id] = np.argsort(distances)[:self._n_for_cluster(num_train, cluster_labels, cluster_id)]
 
-        return n_clusters, cluster_labels, centroids, closest_points
+        return n_clusters, cluster_labels, centroids, closest_points, all_emb
 
     def filter_frames(self, data_arr, closest_points):
         all_indices = []
@@ -719,7 +941,7 @@ class DiversitySampler:
 
         return n_clusters, all_emb, cluster_labels, centroids, closest_points
 
-    def export_frames(self, chosen_frames, out_folder_name):
+    def export_frames(self, chosen_frames, out_folder_name, is_mask=False):
         os.makedirs(out_folder_name, exist_ok=True)
 
         n = chosen_frames.shape[0]
@@ -727,52 +949,325 @@ class DiversitySampler:
         for i in range(n):
             img = chosen_frames[i]
 
-            if img.dtype != np.uint8:
-                img = np.clip(img, 0, 255).astype(np.uint8)
+            if img.ndim == 2:
+                pil_img = Image.fromarray(img, mode="L")
 
-            if img.shape[-1] == 1:
+            elif img.ndim == 3 and img.shape[-1] == 1:
                 img = img.squeeze(-1)
                 pil_img = Image.fromarray(img, mode="L")
-            else:
+
+            elif img.ndim == 3 and img.shape[-1] == 3:
                 pil_img = Image.fromarray(img, mode="RGB")
 
-            pil_img.save(os.path.join(out_folder_name, f"{i:06d}.png"))
+            else:
+                raise ValueError(f"Unsupported image shape: {img.shape}")
 
-    def create_dataset(self, data_arr=None, data_dir=None, extract_vid=False, num_train=None, per_train = 0.1, emb_model=None, method=None, run_eval=True, eval4_n=10, out_dir=None):
-        """
-            Select training frames from scratch taking in: data_dir of video 
-                                                           "         " frames
-                                                           np data array of training frames
+            if is_mask:
+                pil_img.save(os.path.join(out_folder_name, f"{i:06d}_mask.png"))
+            else:
+                pil_img.save(os.path.join(out_folder_name, f"{i:06d}.png"))
 
-        """
-
-        # Define output directory:
-        if out_dir is not None:
-            self.save_path = os.path.join(out_dir)
+    def separate_test_val(self,
+        data_arr: np.ndarray | None = None,
+        data_dir: str | Path | None = None,
+        mask_arr: np.ndarray | None = None,
+        mask_dir: str | Path | None = None,
+        extract_vid: bool = False,
+        test_size: float = 0.1,
+        val_size: float = 0.1,
+        shuffle: bool = True,
+        seed: int = 42,
+        output_dir: str | Path | None = None,
+        ):
+        
+        if output_dir is not None:
+            output_dir = os.path.join(self.save_path, output_dir)
         else:
-            self.save_path = os.path.join(".")
+            output_dir = self.save_path
 
-        # Create data_arr if not already created
-        if data_arr is None and extract_vid:
-            data_arr = self.get_frames_from_mp4(data_dir)
-        elif data_arr is None:
+        if data_arr is None:
+            if data_dir is None:
+                raise ValueError("Provide either data_arr or data_dir.")
             data_dir = Path(data_dir)
-            data_arr = []
-            excluded = {"masks", "annotations", "mask", "val", "validation", "test"}
+
+        if extract_vid:
+            print("Extracting frames from videos...")
+            chunks = []
+            excluded = {"masks", "annotations", "mask"}
+            for mp4 in sorted(data_dir.rglob("*")):
+                if any(exc in part for part in mp4.parts for exc in excluded):
+                    continue
+                if mp4.suffix.lower() == ".mp4":
+                    chunks.append(self.get_frames_from_mp4(str(mp4)))
+            if not chunks:
+                raise FileNotFoundError(f"No .mp4 files found under {data_dir}")
+            data_arr = np.concatenate(chunks, axis=0)
+        elif data_arr is None:
+            print("Loading frames from image files...")
+            frames_list = []
+            excluded = {"masks", "annotations", "mask"}
             for frame in sorted(data_dir.rglob("*")):
                 if any(exc in part for part in frame.parts for exc in excluded):
                     continue
                 if frame.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                    image = Image.open(frame)
-                    image = np.array(image.convert("RGB"))
-                    data_arr.append(image)
+                    img = Image.open(frame).convert("RGB")
+                    frames_list.append(np.array(img, dtype=np.uint8))
+            if not frames_list:
+                raise FileNotFoundError(f"No image files found under {data_dir}")
+            data_arr = np.stack(frames_list, axis=0)
+
+        if data_arr is None or len(data_arr) == 0:
+            raise ValueError(
+                "Error in dataset creation, please make sure to input a correct data_dir or numpy data array"
+            )
+
+        if mask_arr is None and mask_dir is not None:
+            print("Loading masks from mask_dir...")
+            mask_dir = Path(mask_dir)
+            masks_list = []
+            included = {"masks", "annotations", "mask"}
+            for mask_path in sorted(mask_dir.rglob("*")):
+                #Make sure it is a mask
+                is_mask = False
                 
-            data_arr = np.array(data_arr)
+                if any(inc in part for part in mask_path.parts for inc in included):
+                    is_mask = True
+
+                if not is_mask:
+                    continue
+
+                if mask_path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    # Load as RGB if colour mask, else grayscale
+                    mask_img = Image.open(mask_path)
+                    masks_list.append(np.array(mask_img, dtype=np.uint8))
+            if masks_list:
+                mask_arr = np.stack(masks_list, axis=0)
+                if len(mask_arr) != len(data_arr):
+                    raise ValueError(
+                        f"Frame count ({len(data_arr)}) and mask count ({len(mask_arr)}) don't match."
+                    )
+
+        print("Splitting data into train/val/test...")
+        train_val_test_split(
+            data_arr=data_arr,
+            test_size=test_size,
+            val_size=val_size,
+            out_folder=output_dir,
+            mask_arr=mask_arr,
+            shuffle=shuffle,
+            seed=seed,
+        )
+
+    def separate_by_dir_name(self,
+        data_dir: str | Path | None = None,
+        mask_dir: str | Path | None = None,
+        extract_vid: bool = False,
+        mask_type: str = "color_mask",  # "color_mask" | "mask" | "watershed_mask"
+        global_color_map: dict | None = None,
+        target_size: tuple[int, int] | None = (224, 224),
+        output_dir: str | Path = "split_data",
+    ):
+
+        output_dir = os.path.join(self.save_path, output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        if data_dir is None:
+            raise ValueError("Provide a data_dir.")
+
+        data_dir = Path(data_dir)
+        excluded = {"masks", "annotations", "mask"}
+        load_as_rgb = mask_type == "color_mask"
+        mask_mode = "RGB" if load_as_rgb else "L"
+
+        splits = {"train": [], "val": [], "test": []}
+        mask_splits = {"train": [], "val": [], "test": []}
+
+        def get_split(parts):
+            parts_lower = [p.lower() for p in parts]
+            if any("test" in p for p in parts_lower):
+                return "test"
+            elif any("val" in p for p in parts_lower):
+                return "val"
+            return "train"
+
+        def resize_if_needed(img, target_size, resample):
+            if target_size is not None:
+                h, w = target_size
+                return img.resize((w, h), resample)
+            return img
+
+        if extract_vid:
+            print("Extracting frames from videos...")
+            for mp4 in sorted(data_dir.rglob("*")):
+                if any(exc in part for part in mp4.parts for exc in excluded):
+                    continue
+                if mp4.suffix.lower() != ".mp4":
+                    continue
+                split = get_split(mp4.parts)
+                splits[split].append(self.get_frames_from_mp4(str(mp4)))
+        else:
+            print("Loading frames from image files...")
+            for frame_path in sorted(data_dir.rglob("*")):
+                if any(exc in part for part in frame_path.parts for exc in excluded):
+                    continue
+                if frame_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+                    continue
+
+                split = get_split(frame_path.parts)
+
+                # Load frame
+                frame_img = Image.open(frame_path).convert("RGB")
+                frame_img = resize_if_needed(frame_img, target_size, Image.BILINEAR)
+                splits[split].append(np.array(frame_img, dtype=np.uint8))
+
+                # Load corresponding mask if mask_dir not separately provided
+                if mask_dir is None:
+                    mask_path = frame_path.with_name(f"{frame_path.stem}_{mask_type}.png")
+                    if mask_path.exists():
+                        mask_img = Image.open(mask_path).convert(mask_mode)
+                        mask_img = resize_if_needed(mask_img, target_size, Image.NEAREST)
+                        mask_splits[split].append(np.array(mask_img, dtype=np.uint8))
+
+        # Handle separate mask_dir if provided
+        if mask_dir is not None:
+            print("Loading masks from mask_dir...")
+            mask_dir = Path(mask_dir)
+            included = {"masks", "annotations", "mask"}
+            for mask_path in sorted(mask_dir.rglob("*")):
+                if not any(inc in part for part in mask_path.parts for inc in included):
+                    continue
+                if mask_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+                    continue
+                split = get_split(mask_path.parts)
+                mask_img = Image.open(mask_path).convert(mask_mode)
+                mask_img = resize_if_needed(mask_img, target_size, Image.NEAREST)
+                mask_splits[split].append(np.array(mask_img, dtype=np.uint8))
+
+        # Stack arrays per split
+        print("Splitting data into train/val/test...")
+        split_arrays = {}
+        for split_name, items in splits.items():
+            if not items:
+                continue
+            if extract_vid:
+                split_arrays[split_name] = np.concatenate(items, axis=0)
+            else:
+                split_arrays[split_name] = np.stack(items, axis=0)
+
+        mask_arrays = {}
+        for split_name, masks in mask_splits.items():
+            if not masks:
+                continue
+            mask_arrays[split_name] = np.stack(masks, axis=0)
+
+        if not split_arrays:
+            raise FileNotFoundError(f"No files found under {data_dir}")
+
+        # Validate frame/mask counts match
+        print("Validating frame and mask counts...")
+        for split_name in split_arrays:
+            if split_name in mask_arrays:
+                if len(split_arrays[split_name]) != len(mask_arrays[split_name]):
+                    raise ValueError(
+                        f"Frame count ({len(split_arrays[split_name])}) and mask count "
+                        f"({len(mask_arrays[split_name])}) don't match for split '{split_name}'."
+                    )
+
+        # Process color masks into class indices
+        print("Processing color masks into class indices...")
+        color_maps = {}
+        if load_as_rgb:
+            if global_color_map is None:
+                all_mask_pixels = []
+                for split_name, mask_arr in mask_arrays.items():
+                    N, H, W, _ = mask_arr.shape
+                    all_mask_pixels.append(mask_arr.reshape(-1, 3))
+                all_mask_pixels = np.concatenate(all_mask_pixels, axis=0)
+                unique_colors = np.unique(all_mask_pixels, axis=0)
+                unique_colors = sorted(unique_colors, key=luminance)
+                global_color_map = {
+                    idx: [int(c) for c in color]
+                    for idx, color in enumerate(unique_colors)
+                }
+
+            rgb_to_cls = {tuple(color): idx for idx, color in global_color_map.items()}
+
+            for split_name, mask_arr in mask_arrays.items():
+                N, H, W, _ = mask_arr.shape
+                flat = mask_arr.reshape(-1, 3)
+                flat_out = np.zeros(flat.shape[0], dtype=np.uint8)
+                for rgb_tuple, cls in rgb_to_cls.items():
+                    flat_out[np.all(flat == np.array(rgb_tuple), axis=1)] = cls
+                mask_arrays[split_name] = flat_out.reshape(N, H, W)
+                color_maps[split_name] = global_color_map
+
+            with open(os.path.join(output_dir, "color_map.json"), "w") as f:
+                json.dump({str(k): v for k, v in global_color_map.items()}, f, indent=2)
+        else:
+            for split_name in mask_arrays:
+                color_maps[split_name] = {}
+
+        # Save each split
+        print("Saving splits to output directory...")
+        for split_name, data_arr in split_arrays.items():
+            split_output = os.path.join(output_dir, split_name)
+            os.makedirs(split_output, exist_ok=True)
+            np.save(os.path.join(split_output, "frames.npy"), data_arr)
+            if split_name in mask_arrays:
+                np.save(os.path.join(split_output, "masks.npy"), mask_arrays[split_name])
+
+        print("Finished processing all splits.")
+        return split_arrays, mask_arrays, color_maps
+
+    def create_train(self, data_arr=None, data_dir=None, mask_arr=None, extract_vid=False, store_frames=False, num_train=None, per_train = 0.1, emb_model=None, method=None, run_eval=True, run_manual_filter=False,eval4_n=10, train_dir="train/diversity"):
+        """
+            Select training frames from separated candidate train frames in: data_dir of video 
+                                                                             "         " frames
+                                                                             np data array of training frames
+
+        """
+        # Define output directory:
+        self.save_path = data_dir if data_dir is not None else self.save_path
+        og_save = self.save_path
+        
+        out_path = os.path.join(self.save_path, train_dir)
+        os.makedirs(out_path, exist_ok=True)
+        self.save_path = out_path
+
+        print("Loading the training data...")
+        # Create data_arr
+        if data_arr is None:
+            if data_dir is None:
+                raise ValueError("Provide either data_arr or data_dir.")
+            data_dir = Path(data_dir)
+
+        excluded = {"masks", "annotations", "mask", "val", "validation", "test"}
+        if extract_vid:
+            chunks = []
+            for mp4 in sorted(data_dir.rglob("*")):
+                if any(exc in part for part in mp4.parts for exc in excluded):
+                    continue
+                if mp4.suffix.lower() == ".mp4":
+                    chunks.append(self.get_frames_from_mp4(str(mp4)))
+            if not chunks:
+                raise FileNotFoundError(f"No .mp4 files found under {data_dir}")
+            data_arr = np.concatenate(chunks, axis=0)
+        elif data_arr is None:
+            frames_list = []
+            for frame in sorted(data_dir.rglob("*")):
+                if any(exc in part for part in frame.parts for exc in excluded):
+                    continue
+                if frame.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    img = Image.open(frame).convert("RGB")
+                    frames_list.append(np.array(img, dtype=np.uint8))
+            if not frames_list:
+                raise FileNotFoundError(f"No image files found under {data_dir}")
+            data_arr = np.stack(frames_list, axis=0)
 
         # Make sure data array was created properly before preceeding
         if data_arr is None or len(data_arr) == 0:
             raise ValueError(
-                "Error in dataset creation, please make sure to input a correct data_dir or numpy data array"
+                "Error in training data creation, please make sure to input a correct data_dir or numpy data array"
             )
 
         # If num_train not specified, use per_train to determine approximate number of training samples to select
@@ -780,69 +1275,113 @@ class DiversitySampler:
             num_train = int(len(data_arr) * per_train)
 
         # Allow override of embed_model for dataset creation, otherwise default to the initialized preferred method
-        if emb_model is None:
-            if self.emb_model == "dino":
-                all_emb = self.run_dino(data_arr)
-            elif self.emb_model == "openclip":
-                all_emb = self.run_openclip(data_arr)
+        print("Computing embeddings...")
+        _emb_model = emb_model or self.emb_model
+        if _emb_model == "dino":
+            all_emb = self.run_dino(data_arr)
+        elif _emb_model == "openclip":
+            all_emb = self.run_openclip(data_arr)
         else:
-            if emb_model == "dino":
-                all_emb = self.run_dino(data_arr)
-            elif emb_model == "openclip":
-                all_emb = self.run_openclip(data_arr)
-            else:
-                raise ValueError(
-                    "Must specify a valid embedding model in function call to override default, Choose 'dino' or 'openclip'."
-                )
+            raise ValueError("Must specify a valid embedding model. Choose 'dino' or 'openclip'.")
 
         # Allow override of clustering method for dataset creation, otherwise default to the initialized preferred method
-        if method is None:
-            if self.method == "hdbscan":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(all_emb, num_train)
-            elif self.method == "dbscan":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(all_emb, num_train)
-            elif self.method == "kmeans_elbow":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_knn(all_emb=all_emb, num_train=num_train, method = "elbow")
-            elif self.method == "kmeans_sil":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_knn(all_emb, num_train)
+        print("Performing clustering...")
+        _method = method or self.method
+        if _method == "hdbscan":
+            n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(all_emb, num_train)
+        elif _method == "dbscan":
+            n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(all_emb, num_train)
+        elif _method == "kmeans_elbow":
+            n_clusters, cluster_labels, centroids, closest_points, all_emb = self.run_knn(
+                all_emb=all_emb, num_train=num_train, method="elbow"
+            )
+        elif _method == "kmeans_sil":
+            n_clusters, cluster_labels, centroids, closest_points, all_emb = self.run_knn(
+                all_emb=all_emb, num_train=num_train, method="silhouette"
+            )
         else:
-            if method == "hdbscan":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(all_emb, num_train)
-            elif method == "dbscan":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(all_emb, num_train)
-            elif method == "kmeans_elbow":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_knn(all_emb=all_emb, num_train=num_train, method = "elbow")
-            elif method == "kmeans_sil":
-                n_clusters, cluster_labels, centroids, closest_points = self.run_knn(all_emb, num_train)
-            else:
-                raise ValueError("Must specify a valid clustering method in function call to override default, Choose 'hbdscan', 'dbscan', 'kmeans_elbows', 'kmeans_sil'.")
+            raise ValueError(
+                "Must specify a valid clustering method. Choose 'hdbscan', 'dbscan', 'kmeans_elbow', 'kmeans_sil'."
+            )
 
         # Run dataset quality evaluation 
         if run_eval:
+            print("running dataset quality evaluation...")
             self.eval_iso(data_arr=data_arr, all_emb=all_emb, cluster_labels=cluster_labels, 
                           centroids=centroids, include_outliers=True)
             self.eval_tightness(all_emb, cluster_labels, centroids)
             self.evaluate(data_arr=data_arr, all_emb=all_emb, cluster_labels=cluster_labels, centroids=centroids, n=eval4_n)
             
             # Optional user specified manual clustering after analysis of the dataset evaluation metrics
-            n_clusters, all_emb, cluster_labels, centroids, closest_points = self.filter_clusters_manually(all_emb, num_train, cluster_labels, centroids, closest_points)
+            if run_manual_filter:
+                n_clusters, all_emb, cluster_labels, centroids, closest_points = self.filter_clusters_manually(all_emb, num_train, cluster_labels, centroids, closest_points)
 
         filtered_frames, all_indices = self.filter_frames(data_arr, closest_points)
 
-        # Save filtered frames, full dataset, and embeddings
-        self.export_frames(filtered_frames, self.save_path)
-        np.save(os.path.join(self.save_path, "data_array"), data_arr)
-        np.save(os.path.join(self.save_path, "all_embeddings.npy"), all_emb)
+        # Save filtered frames + masks (if available), training data metadata
+        print(f"Saving files and metadata to: {out_path}...")
+        if store_frames:
+            frame_out_path = os.path.join(out_path, "frames")
+            os.makedirs(frame_out_path, exist_ok=True)
+            print(f"Also saving filtered frames to: {frame_out_path}...")
+            self.export_frames(chosen_frames=filtered_frames, out_folder_name=frame_out_path, is_mask=False)
+        
+        np.save(os.path.join(out_path, "frames.npy"), filtered_frames)
+
+        filtered_masks = None
+        if mask_arr is not None:
+            filtered_masks = mask_arr[all_indices]
+            if store_frames:
+                mask_out_path = os.path.join(out_path, "masks")
+                os.makedirs(mask_out_path, exist_ok=True)
+                print(f"Also saving filtered masks to: {mask_out_path}...")
+                self.export_frames(chosen_frames=filtered_masks, out_folder_name=mask_out_path, is_mask=True)
+        else:
+            mask_dir = Path(og_save)
+            masks_list = []
+            included = {"masks", "annotations", "mask"}
+            for mask_path in sorted(mask_dir.rglob("*")):
+                #Make sure it is a mask
+                is_mask = False
+                if any(exc in part for part in mask_path.parts for exc in excluded):
+                    continue
+                
+                if any(inc in part for part in mask_path.parts for inc in included):
+                    is_mask = True
+                if not is_mask:
+                    continue
+    
+                if mask_path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    # Determine mode: colour masks → RGB, grayscale → L
+                    mask_img = Image.open(mask_path)
+                    masks_list.append(np.array(mask_img, dtype=np.uint8))
+            if masks_list:
+                loaded_masks = np.stack(masks_list, axis=0)
+                filtered_masks = loaded_masks[all_indices]
+                if store_frames:
+                    mask_out_path = os.path.join(out_path, "masks")
+                    os.makedirs(mask_out_path, exist_ok=True)
+                    print(f"Also saving filtered masks to: {mask_out_path}...")
+                    self.export_frames(chosen_frames=filtered_masks, out_folder_name=mask_out_path, is_mask=True)
+                    
+        if filtered_masks is not None:
+            np.save(os.path.join(out_path, "masks.npy"), filtered_masks)
+
+        np.save(os.path.join(out_path, "all_embeddings.npy"), all_emb)
 
         #write out to a meta_data.json with n_clusters and all_indices and num_training
         metadata = {
             "n_clusters": int(n_clusters),
             "num_frames": len(data_arr),
             "all_indices": [int(i) for i in all_indices],
+            "cluster_labels": [int(i) for i in cluster_labels],
 
         }
-        metadata_path = os.path.join(self.save_path, "training_metadata.json")
+        metadata_path = os.path.join(out_path, "training_metadata.json")
         with open(metadata_path, "w") as f:
             json.dump(metadata, f, indent=2)
 
-        return filtered_frames, all_indices
+        #Too make sure class returns to original save path
+        self.save_path = og_save
+
+        return filtered_frames, filtered_masks, all_indices
