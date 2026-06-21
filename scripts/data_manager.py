@@ -10,6 +10,7 @@ from PIL import Image
 
 from frame_extractor import load_video, process_video, process_videos, VIDEO_EXTENSIONS
 from auxiliary import pitvis_extractor
+from auxiliary import coco_converted as cc
 
 # Different ways to load frames and masks, together or separately
 def load_frames_and_masks(
@@ -21,6 +22,7 @@ def load_frames_and_masks(
         force_color_processing: bool = False,
         global_color_map: dict | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
+
 
     dataset_root = Path(dataset_root)
     if not dataset_root.exists():
@@ -85,11 +87,9 @@ def load_frames_and_masks(
         if not video_ids:
             raise FileNotFoundError(f"No numbered video folders found under {dataset_root}")
 
-        # Load all annotations up front using the pitvis_extractor helper
         annot_index = pitvis_extractor.load_pitvis_annotations(dataset_root, video_ids)
 
-        # Collect frame paths and track (video_id, frame_index) metadata in parallel
-        pitvis_meta = []  # list of (int_video, int_time) tuples, one per frame
+        pitvis_meta = []
         for vid_id in video_ids:
             vid_dir = dataset_root / f"{vid_id:02d}"
             print(f"Scanning {vid_dir.name}...")
@@ -98,7 +98,6 @@ def load_frames_and_masks(
                     continue
                 if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                     frame_paths.append(f)
-                    # Frame index is encoded in the filename stem as an integer timestamp
                     pitvis_meta.append((vid_id, int(f.stem)))
 
     else:
@@ -112,6 +111,25 @@ def load_frames_and_masks(
         )
 
     print(f"Found {len(frame_paths)} frames.")
+
+    # For any frame missing a mask PNG, check for a coco.json and convert if found
+    dirs_needing_conversion: set[Path] = set()
+    for frame_path in frame_paths:
+        mask_path = frame_path.parent / f"{frame_path.stem}_{mask_type}.png"
+        if not mask_path.exists():
+            dirs_needing_conversion.add(frame_path.parent)
+
+    for d in dirs_needing_conversion:
+        coco_path = d / "coco.json"
+        if coco_path.exists():
+            print(f"No mask PNGs found in {d.name}, converting from {coco_path.name}...")
+            with open(coco_path) as f:
+                coco_data = json.load(f)
+            cc.convert_coco_to_png_masks(coco_data, str(d))
+        else:
+            raise FileNotFoundError(
+                f"No mask PNGs and no coco.json found in {d} — cannot load masks."
+            )
 
     if target_size is not None:
         h, w = target_size
@@ -177,15 +195,12 @@ def load_frames_and_masks(
         unique_vals = np.unique(masks)
         print(f"Finished processing masks. Unique values found: {unique_vals}")
 
-    # For pitvis datasets, resolve annotations into a labels array and attach it
-    # to the return value as an extra element so callers can unpack it.
     if dataset_style == "pitvis":
         labels = pitvis_extractor.get_pitvis_labels(annot_index, pitvis_meta)
         print(f"Finished loading pitvis labels. Shape: {labels.shape}")
         return frames, masks, color_map, labels
 
     return frames, masks, color_map
-
 
 def load_frames_from_dir(
         data_dir: str | Path,
@@ -219,6 +234,7 @@ def load_masks_from_dir(
         target_size: tuple[int, int] | None = None,
         mask_mode: str = "L",
         include: set[str] | None = None,
+        mask_type: str = "mask",
     ) -> np.ndarray:
 
     mask_dir = Path(mask_dir)
@@ -235,6 +251,27 @@ def load_masks_from_dir(
             h, w = target_size
             mask_img = mask_img.resize((w, h), Image.NEAREST)
         masks_list.append(np.array(mask_img, dtype=np.uint8))
+
+    if not masks_list:
+        coco_path = mask_dir / "coco.json"
+        if coco_path.exists():
+            print(f"No mask PNGs found in {mask_dir.name}, converting from {coco_path.name}...")
+            with open(coco_path) as f:
+                coco_data = json.load(f)
+            cc.convert_coco_to_png_masks(coco_data, str(mask_dir))
+
+            for mask_path in sorted(mask_dir.rglob("*")):
+                if not mask_path.name.endswith(f"_{mask_type}.png"):
+                    continue
+                mask_img = Image.open(mask_path).convert(mask_mode)
+                if target_size is not None:
+                    h, w = target_size
+                    mask_img = mask_img.resize((w, h), Image.NEAREST)
+                masks_list.append(np.array(mask_img, dtype=np.uint8))
+        else:
+            raise FileNotFoundError(
+                f"No mask files and no coco.json found under {mask_dir}"
+            )
 
     if not masks_list:
         raise FileNotFoundError(f"No mask files found under {mask_dir}")

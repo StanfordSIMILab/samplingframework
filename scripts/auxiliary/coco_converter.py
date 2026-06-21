@@ -210,5 +210,72 @@ def convert_selected_frames_to_coco(self, selected_frames, output_file_path, cat
 
     print(f"COCO file created at: {output_file_path}")
 
+def convert_coco_to_png_masks(
+    coco_annotations: Dict,
+    images_dir: str,
+) -> None:
+    coco_data = coco_annotations
+
+    category_map = {cat["id"]: cat["name"] for cat in coco_data.get("categories", [])}
+    image_info = {img["id"]: img for img in coco_data["images"]}
+
+    frame_annots: Dict[str, list] = {}
+    for ann in coco_data["annotations"]:
+        frame_id = ann["image_id"]
+        frame_annots.setdefault(frame_id, []).append(ann)
+
+    for image_id, anns in tqdm(frame_annots.items(), desc="Creating masks"):
+        img_info = image_info.get(image_id)
+        if img_info is None:
+            continue
+
+        h, w = img_info["height"], img_info["width"]
+        frame_name = os.path.splitext(os.path.basename(img_info["file_name"]))[0]
+
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for ann in anns:
+            category_id = ann.get("category_id", 0)
+            seg = ann.get("segmentation")
+
+            if seg is None:
+                print(f"  Warning: ann {ann.get('id')} on frame {image_id} has no segmentation — skipping")
+                continue
+
+            if isinstance(seg, list):
+                polys = seg if (len(seg) > 0 and isinstance(seg[0], list)) else [seg]
+                for poly in polys:
+                    if len(poly) < 6:
+                        print(
+                            f"  Warning: ann {ann.get('id')} on frame {image_id} has degenerate "
+                            f"polygon with {len(poly)} values (need ≥ 6) — skipping polygon"
+                        )
+                        continue
+                    pts = np.array(poly, dtype=np.int32).reshape(-1, 2)
+                    cv2.fillPoly(combined_mask, [pts], category_id)
+
+            elif isinstance(seg, dict):
+                if mask_utils is None:
+                    print(f"  Warning: skipping RLE mask for ann {ann['id']} — pycocotools not installed")
+                    continue
+                try:
+                    if isinstance(seg.get("counts"), list):
+                        rle = mask_utils.frPyObjects(seg, seg["size"][0], seg["size"][1])
+                    else:
+                        rle = seg
+                    rle_mask = mask_utils.decode(rle)
+                    combined_mask[rle_mask > 0] = category_id
+                except Exception as e:
+                    print(f"  Warning: failed to decode RLE mask for ann {ann.get('id')} on frame {image_id}: {e} — skipping")
+                    continue
+
+        if combined_mask.max() == 0:
+            print(f"  Warning: frame {image_id} produced an empty mask — skipping")
+            continue
+
+        out_path = os.path.join(images_dir, f"{frame_name}_mask.png")
+        Image.fromarray(combined_mask).save(out_path)
+
+    print(f"  ✓ Masks saved under {images_dir}")
 
     
