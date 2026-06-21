@@ -23,7 +23,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Split dataset into train, val, and test sets, and create the training set using diversity sampling or random sampling"
     )
-    
+
     # Data processing parameters
     parser.add_argument(
         "--data-folder", required=True, type=str,
@@ -36,6 +36,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mask-type", default="color_mask", type=str,
         help="Mask type: 'color_mask', 'mask', or 'watershed_mask'"
+    )
+    parser.add_argment(
+        "--num_classes", default=None, type=int,
+        help="number of classes for evaluating model"
     )
 
     # Data Partioning (train/val/test) parameters
@@ -197,6 +201,7 @@ if __name__ == "__main__":
             val_video=val_video,
             output_dir=str(data_folder / "eval_outputs"),
             model_name=args.model_name if hasattr(args, "model_name") else None,
+            num_classes=args.num_classes
         )
 
     print("Done!")
