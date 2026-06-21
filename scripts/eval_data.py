@@ -39,7 +39,7 @@ _HF_IDS = {
     "upernet":     "openmmlab/upernet-swin-large",
 }
 
-
+# Dataset utilities
 class SurgicalDataset(Dataset):
     def __init__(self, frames: np.ndarray, labels: np.ndarray, size: int = 128):
         self.frames = frames
@@ -54,7 +54,7 @@ class SurgicalDataset(Dataset):
         img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
         return img, self.labels[idx]
 
-
+# Model utilities
 class LightCNN(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
@@ -80,45 +80,45 @@ class LightCNN(nn.Module):
         return self.net(x)
 
 
-def build_model(num_classes: int):
-    if MODEL == "mask2former":
+def build_model(num_classes: int, model_name: str | None = None):
+    if model_name == "mask2former":
         mid  = _HF_IDS["mask2former"]
         proc = Mask2FormerImageProcessor.from_pretrained(mid)
         mdl  = Mask2FormerForUniversalSegmentation.from_pretrained(
             mid, num_labels=num_classes, ignore_mismatched_sizes=True)
         return proc, mdl
 
-    elif MODEL == "segformer":
+    elif model_name == "segformer":
         mid  = _HF_IDS["segformer"]
         proc = AutoImageProcessor.from_pretrained(mid)
         mdl  = SegformerForSemanticSegmentation.from_pretrained(
             mid, num_labels=num_classes, ignore_mismatched_sizes=True)
         return proc, mdl
 
-    elif MODEL == "upernet":
+    elif model_name == "upernet":
         mid  = _HF_IDS["upernet"]
         proc = AutoImageProcessor.from_pretrained(mid)
         mdl  = UperNetForSemanticSegmentation.from_pretrained(
             mid, num_labels=num_classes, ignore_mismatched_sizes=True)
         return proc, mdl
 
-    elif MODEL == "deeplab":
+    elif model_name == "deeplab":
         import torchvision
         mdl = torchvision.models.segmentation.deeplabv3_resnet101(weights="DEFAULT")
         mdl.classifier[-1]     = torch.nn.Conv2d(256, num_classes, 1)
         mdl.aux_classifier[-1] = torch.nn.Conv2d(256, num_classes, 1)
         return None, mdl
 
-    elif MODEL == "unet":
+    elif model_name == "unet":
         import segmentation_models_pytorch as smp
         mdl = smp.Unet(encoder_name="resnet50", encoder_weights="imagenet",
                        in_channels=3, classes=num_classes)
         return None, mdl
 
     else:
-        raise ValueError(f"Unknown model: {MODEL!r}")
+        raise ValueError(f"Unknown model: {model_name!r}")
 
-
+# Training utilities for segmentation and phase classification
 def train_loop(
     x_train: np.ndarray,
     train_labels: np.ndarray,
@@ -217,9 +217,9 @@ def train_segmentation_model(
     label, num_classes, class_names, num_epochs=30,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    processor, model = build_model(num_classes)
+    processor, model = build_model(num_classes, model_name=model_name)
 
-    if MODEL == "mask2former":
+    if model_name == "mask2former":
         backbone_params = list(model.model.pixel_level_module.encoder.parameters())
         other_params = [p for p in model.parameters()
                         if not any(p is q for q in backbone_params)]
@@ -237,7 +237,7 @@ def train_segmentation_model(
         label, num_classes, class_names, model, num_epochs,
     )
 
-
+# Plot utilities
 def plot_training_curves(hist_div: dict, hist_rand: dict) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     epochs = range(1, len(hist_div["train_loss"]) + 1)
@@ -329,26 +329,74 @@ def plot_balanced_accuracy(bal_div: float, bal_rand: float) -> None:
     plt.savefig(f"{OUTPUT_DIR}/balanced_accuracy.png", dpi=150)
     plt.show()
 
+# Main function to run the entire evaluation pipeline
+def main(
+    task: str,
+    dataset_root: str,
+    dataset_style: str = "cholec",
+    val_root: str | None = None,
+    train_videos: list | None = None,
+    val_video: str | None = None,
+    target_size: tuple[int, int] = (224, 224),
+    output_dir: str = "outputs",
+    model_name: str | None = None,
+    num_epochs: int = 30,
+) -> None:
+    os.makedirs(output_dir, exist_ok=True)
 
-def main(task=None, model_name=None, dataset=None) -> None:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    annot_index = pitvis_extractor.load_pitvis_annotations(PITVIS_DIR, TRAIN_VIDEOS + [VAL_VIDEO])
+    if dataset_style == "pitvis":
+        frames_train, _, color_map, labels_train_raw = dm.load_frames_and_masks(
+            dataset_root=dataset_root,
+            target_size=target_size,
+            videos=[str(v) for v in train_videos] if train_videos else None,
+            dataset_style="pitvis",
+        )
+        frames_val, _, _, labels_val_raw = dm.load_frames_and_masks(
+            dataset_root=dataset_root,
+            target_size=target_size,
+            videos=[str(val_video)] if val_video is not None else None,
+            dataset_style="pitvis",
+        )
 
-    all_frames = []
-    all_meta = []
-    for vid in TRAIN_VIDEOS:
-        print(f"\nLoading video {vid:02d}...")
-        frames = load_video(f"{PITVIS_DIR}/video_{vid:02d}.mp4")
-        fvi_scores = compute_fvi(frames)
-        show_fvi_histogram(fvi_scores, vid)
-        thresh = float(input(f"FVI threshold for video {vid:02d}: "))
-        filtered, kept_indices, _ = fvi_filter(frames, thresh)
-        print(f"Kept {len(filtered)} / {len(frames)} frames")
-        all_frames.append(filtered)
-        all_meta.extend([(vid, fi) for fi in kept_indices])
+        step_names = (
+            pd.read_csv(f"{dataset_root}/map_steps.csv")
+            .drop_duplicates("int_step")
+            .set_index("int_step")["str_step"]
+            .to_dict()
+        )
+        all_steps = np.unique(np.concatenate([labels_train_raw[:, 0], labels_val_raw[:, 0]]))
+        class_map = {s: i for i, s in enumerate(all_steps)}
+        num_classes = len(class_map)
+        class_names = [step_names.get(s, str(s)).strip() for s in all_steps]
 
-    all_frames = np.concatenate(all_frames, axis=0)
-    print(f"\nTotal train frames after FVI filtering: {len(all_frames)}")
+        def remap(col: np.ndarray) -> np.ndarray:
+            return np.array([class_map[s] for s in col], dtype=np.int64)
+
+        all_labels_train = remap(labels_train_raw[:, 0])
+        labels_val = remap(labels_val_raw[:, 0])
+
+    else:
+        frames_train, masks_train, color_map = dm.load_frames_and_masks(
+            dataset_root=dataset_root,
+            target_size=target_size,
+            videos=[str(v) for v in train_videos] if train_videos else None,
+            dataset_style=dataset_style,
+        )
+        _val_root = val_root if val_root is not None else dataset_root
+        frames_val, masks_val, _ = dm.load_frames_and_masks(
+            dataset_root=_val_root,
+            target_size=target_size,
+            videos=[str(val_video)] if val_video is not None else None,
+            dataset_style=dataset_style,
+            global_color_map=color_map,
+        )
+
+        all_labels_train = masks_train.reshape(len(masks_train), -1)[:, 0].astype(np.int64)
+        labels_val = masks_val.reshape(len(masks_val), -1)[:, 0].astype(np.int64)
+        num_classes = len(color_map)
+        class_names = [str(i) for i in range(num_classes)]
+
+    all_frames = frames_train
 
     sampler = DiversitySampler(
         optim_clusters=True,
@@ -370,74 +418,48 @@ def main(task=None, model_name=None, dataset=None) -> None:
         method="kmeans_sil",
         run_eval=True,
         save_data=True,
-        data_dir=OUTPUT_DIR,
+        data_dir=output_dir,
     )
 
     diverse_indices = np.array(diverse_indices)
     random_indices = np.random.choice(len(all_frames), size=len(diverse_indices), replace=False)
 
-    x_div = all_frames[diverse_indices]
-    y_div = pitvis_extractor.get_pitvis_labels(annot_index, [all_meta[i] for i in diverse_indices])
+    x_div  = all_frames[diverse_indices]
+    y_div  = all_labels_train[diverse_indices]
     x_rand = all_frames[random_indices]
-    y_rand = pitvis_extractor.get_pitvis_labels(annot_index, [all_meta[i] for i in random_indices])
-
-    print(f"\nLoading val video {VAL_VIDEO:02d}...")
-    x_val = load_video(f"{PITVIS_DIR}/video_{VAL_VIDEO:02d}.mp4")
-    y_val = pitvis_extractor.get_pitvis_labels(annot_index, [(VAL_VIDEO, fi) for fi in range(len(x_val))])
-
-    full_n    = normalize(all_emb)
-    diverse_n = normalize(all_emb[diverse_indices])
-    random_n  = normalize(all_emb[random_indices])
+    y_rand = all_labels_train[random_indices]
 
     sampler.evaluate_vs_other(
         random_indices=random_indices,
-        all_emb=full_n,
+        all_emb=normalize(all_emb),
         diverse_indices=diverse_indices,
-        save_dir=OUTPUT_DIR,
+        save_dir=output_dir,
     )
-
-    step_names = (
-        pd.read_csv(f"{PITVIS_DIR}/map_steps.csv")
-        .drop_duplicates("int_step")
-        .set_index("int_step")["str_step"]
-        .to_dict()
-    )
-    all_steps = np.unique(np.concatenate([y_div[:, 0], y_rand[:, 0], y_val[:, 0]]))
-    class_map = {s: i for i, s in enumerate(all_steps)}
-    num_classes = len(class_map)
-    class_names = [step_names.get(s, str(s)).strip() for s in all_steps]
-
-    def remap(col: np.ndarray) -> np.ndarray:
-        return np.array([class_map[s] for s in col], dtype=np.int64)
-
-    labels_div  = remap(y_div[:, 0])
-    labels_rand = remap(y_rand[:, 0])
-    labels_val  = remap(y_val[:, 0])
 
     print(f"\nx_div: {x_div.shape}  y_div: {y_div.shape}")
     print(f"x_rand: {x_rand.shape}  y_rand: {y_rand.shape}")
-    print(f"x_val: {x_val.shape}  y_val: {y_val.shape}")
+    print(f"x_val: {frames_val.shape}  labels_val: {labels_val.shape}")
 
     if task == "phase_classification":
         print("\nTraining on diverse dataset...")
-        model_div, hist_div, preds_div, gts_div, bal_div = train_phase_classifier(
-            x_div, labels_div, x_val, labels_val, "diverse", num_classes, class_names
+        _, hist_div, preds_div, gts_div, bal_div = train_phase_classifier(
+            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs
         )
         print("\nTraining on random dataset...")
-        model_rand, hist_rand, preds_rand, gts_rand, bal_rand = train_phase_classifier(
-            x_rand, labels_rand, x_val, labels_val, "random", num_classes, class_names
+        _, hist_rand, preds_rand, gts_rand, bal_rand = train_phase_classifier(
+            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs
         )
     elif task == "segmentation":
         print("\nTraining on diverse dataset...")
-        model_div, hist_div, preds_div, gts_div, bal_div = train_segmentation_model(
-            x_div, labels_div, x_val, labels_val, "diverse", num_classes, class_names
+        _, hist_div, preds_div, gts_div, bal_div = train_segmentation_model(
+            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs
         )
         print("\nTraining on random dataset...")
-        model_rand, hist_rand, preds_rand, gts_rand, bal_rand = train_segmentation_model(
-            x_rand, labels_rand, x_val, labels_val, "random", num_classes, class_names
+        _, hist_rand, preds_rand, gts_rand, bal_rand = train_segmentation_model(
+            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs
         )
     else:
-        raise ValueError(f"Unknown task: {task}, please choose from 'phase_classification', 'segmentation'")
+        raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 
     plot_training_curves(hist_div, hist_rand)
     plot_confusion_matrices(
@@ -454,4 +476,10 @@ def main(task=None, model_name=None, dataset=None) -> None:
 
 
 if __name__ == "__main__":
-    main("phase_classification")
+    main(
+        task="phase_classification",
+        dataset_root="path/to/dataset",
+        dataset_style="pitvis",
+        train_videos=[1, 2, 3],
+        val_video=4,
+    )
