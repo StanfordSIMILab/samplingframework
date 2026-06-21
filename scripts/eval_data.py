@@ -27,10 +27,8 @@ from transformers import (
     UperNetForSemanticSegmentation,
 )
 
+from auxiliary import data_manager as dm
 from diversity_sampler import DiversitySampler
-from frame_extractor import load_video
-from fvi_computation import compute_fvi, fvi_filter, show_fvi_histogram
-from auxiliary import pitvis_extractor
 
 
 _HF_IDS = {
@@ -53,6 +51,21 @@ class SurgicalDataset(Dataset):
         img = cv2.resize(self.frames[idx], (self.size, self.size))
         img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
         return img, self.labels[idx]
+
+class HFSegDataset(Dataset):
+    def __init__(self, frames: np.ndarray, labels: np.ndarray, processor):
+        self.frames = frames
+        self.labels = labels
+        self.processor = processor
+
+    def __len__(self) -> int:
+        return len(self.frames)
+
+    def __getitem__(self, idx: int):
+        img = Image.fromarray(self.frames[idx])
+        mask = self.labels[idx]
+        encoding = self.processor(images=img, segmentation_maps=mask, return_tensors="pt")
+        return {k: v.squeeze(0) for k, v in encoding.items()}
 
 # Model utilities
 class LightCNN(nn.Module):
@@ -118,7 +131,7 @@ def build_model(num_classes: int, model_name: str | None = None):
     else:
         raise ValueError(f"Unknown model: {model_name!r}")
 
-# Training utilities for segmentation and phase classification
+# Training loop for hugging face vs. other
 def train_loop(
     x_train: np.ndarray,
     train_labels: np.ndarray,
@@ -200,7 +213,111 @@ def train_loop(
 
     return model, history, preds, gts, bal_acc
 
+def train_loop_hf(
+    x_train: np.ndarray,
+    train_labels: np.ndarray,
+    x_val: np.ndarray,
+    val_labels: np.ndarray,
+    label: str,
+    num_classes: int,
+    class_names: list,
+    model: nn.Module,
+    processor,
+    model_name: str,
+    num_epochs: int = 30,
+):
+    from PIL import Image as PILImage
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
+    train_dl = DataLoader(
+        HFSegDataset(x_train, train_labels, processor),
+        batch_size=4,
+        shuffle=True,
+        num_workers=0,
+    )
+    val_dl = DataLoader(
+        HFSegDataset(x_val, val_labels, processor),
+        batch_size=4,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+
+    for epoch in range(num_epochs):
+        model.train()
+        tl, tc, tt = 0.0, 0, 0
+        for batch in train_dl:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            optimizer.zero_grad()
+            outputs = model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+
+            if model_name == "mask2former":
+                logits = outputs.masks_queries_logits
+                preds = logits.argmax(1)
+            else:
+                logits = outputs.logits
+                preds = logits.argmax(1)
+
+            target = batch.get("labels", batch.get("mask_labels"))
+            if target is not None:
+                valid = target != 255
+                tc += (preds[valid] == target[valid]).sum().item()
+                tt += valid.sum().item()
+            tl += loss.item() * len(batch["pixel_values"])
+
+        model.eval()
+        vl, vc, vt = 0.0, 0, 0
+        all_preds, all_gts = [], []
+        with torch.no_grad():
+            for batch in val_dl:
+                batch = {k: v.to(device) for k, v in batch.items()}
+                outputs = model(**batch)
+                vl += outputs.loss.item() * len(batch["pixel_values"])
+
+                if model_name == "mask2former":
+                    logits = outputs.masks_queries_logits
+                    preds = logits.argmax(1)
+                else:
+                    logits = outputs.logits
+                    preds = logits.argmax(1)
+
+                target = batch.get("labels", batch.get("mask_labels"))
+                if target is not None:
+                    valid = target != 255
+                    vc += (preds[valid] == target[valid]).sum().item()
+                    vt += valid.sum().item()
+                    all_preds.extend(preds[valid].cpu().numpy())
+                    all_gts.extend(target[valid].cpu().numpy())
+
+        n_train = len(x_train)
+        n_val = len(x_val)
+        history["train_loss"].append(tl / n_train)
+        history["val_loss"].append(vl / n_val)
+        history["train_acc"].append(tc / max(tt, 1))
+        history["val_acc"].append(vc / max(vt, 1))
+        print(
+            f"[{label}] {epoch + 1}/{num_epochs}"
+            f"  loss={history['train_loss'][-1]:.3f}"
+            f"  val_acc={history['val_acc'][-1]:.3f}"
+        )
+
+    preds = np.array(all_preds)
+    gts = np.array(all_gts)
+    bal_acc = balanced_accuracy_score(gts, preds)
+    print(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
+    print(classification_report(gts, preds, target_names=class_names, zero_division=0))
+
+    return model, history, preds, gts, bal_acc
+
+
+# Training scripts for phase_classifier vs. segmentation
 def train_phase_classifier(
     x_train, train_labels, x_val, val_labels,
     label, num_classes, class_names, num_epochs=30,
@@ -214,23 +331,28 @@ def train_phase_classifier(
 
 def train_segmentation_model(
     x_train, train_labels, x_val, val_labels,
-    label, num_classes, class_names, num_epochs=30,
+    label, num_classes, class_names, num_epochs=30, model_name: str | None = None,
 ):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     processor, model = build_model(num_classes, model_name=model_name)
 
-    if model_name == "mask2former":
-        backbone_params = list(model.model.pixel_level_module.encoder.parameters())
-        other_params = [p for p in model.parameters()
-                        if not any(p is q for q in backbone_params)]
-        optimizer = torch.optim.AdamW(
-            [{"params": backbone_params, "lr": 1e-5},
-             {"params": other_params, "lr": 1e-4}],
-            weight_decay=1e-4,
+    if model_name in {"mask2former", "segformer", "upernet"}:
+        if model_name == "mask2former":
+            backbone_params = list(model.model.pixel_level_module.encoder.parameters())
+            other_params = [p for p in model.parameters()
+                            if not any(p is q for q in backbone_params)]
+            optimizer = torch.optim.AdamW(
+                [{"params": backbone_params, "lr": 1e-5},
+                 {"params": other_params, "lr": 1e-4}],
+                weight_decay=1e-4,
+            )
+            for param_group in optimizer.param_groups:
+                for p in param_group["params"]:
+                    p.requires_grad_(True)
+
+        return train_loop_hf(
+            x_train, train_labels, x_val, val_labels,
+            label, num_classes, class_names, model, processor, model_name, num_epochs,
         )
-        for param_group in optimizer.param_groups:
-            for p in param_group["params"]:
-                p.requires_grad_(True)
 
     return train_loop(
         x_train, train_labels, x_val, val_labels,
@@ -238,7 +360,9 @@ def train_segmentation_model(
     )
 
 # Plot utilities
-def plot_training_curves(hist_div: dict, hist_rand: dict) -> None:
+def plot_training_curves(hist_div: dict, hist_rand: dict, output_dir: str) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     epochs = range(1, len(hist_div["train_loss"]) + 1)
     for ax, key, ylabel in [(axes[0], "loss", "Loss"), (axes[1], "acc", "Accuracy")]:
@@ -251,7 +375,7 @@ def plot_training_curves(hist_div: dict, hist_rand: dict) -> None:
         ax.legend()
     fig.suptitle("Training curves — diverse vs random", fontsize=13)
     plt.tight_layout()
-    plt.savefig(f"{OUTPUT_DIR}/training_curves.png", dpi=150)
+    plt.savefig(f"{output_dir}/training_curves.png", dpi=150)
     plt.show()
 
 
@@ -264,7 +388,10 @@ def plot_confusion_matrices(
     bal_rand: float,
     num_classes: int,
     class_names: list,
+    output_dir: str,
 ) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
     for ax, preds, gts, label, bal in [
         (axes[0], preds_div, gts_div, "diverse", bal_div),
@@ -282,7 +409,7 @@ def plot_confusion_matrices(
         plt.colorbar(im, ax=ax)
     fig.suptitle("Normalised confusion matrix", fontsize=13)
     plt.tight_layout()
-    plt.savefig(f"{OUTPUT_DIR}/confusion_matrices.png", dpi=150)
+    plt.savefig(f"{output_dir}/confusion_matrices.png", dpi=150)
     plt.show()
 
 
@@ -295,7 +422,10 @@ def plot_per_class_f1(
     bal_rand: float,
     num_classes: int,
     class_names: list,
+    output_dir: str,
 ) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+
     f1_div = f1_score(gts_div, preds_div, labels=list(range(num_classes)), average=None, zero_division=0)
     f1_rand = f1_score(gts_rand, preds_rand, labels=list(range(num_classes)), average=None, zero_division=0)
     x_pos = np.arange(num_classes)
@@ -309,11 +439,13 @@ def plot_per_class_f1(
     ax.set_title("Per-class F1 — diverse vs random")
     ax.legend()
     plt.tight_layout()
-    plt.savefig(f"{OUTPUT_DIR}/per_class_f1.png", dpi=150)
+    plt.savefig(f"{output_dir}/per_class_f1.png", dpi=150)
     plt.show()
 
 
-def plot_balanced_accuracy(bal_div: float, bal_rand: float) -> None:
+def plot_balanced_accuracy(bal_div: float, bal_rand: float, output_dir: str) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+
     fig, ax = plt.subplots(figsize=(5, 5))
     bars = ax.bar(
         ["diverse", "random"],
@@ -326,7 +458,7 @@ def plot_balanced_accuracy(bal_div: float, bal_rand: float) -> None:
     ax.set_ylabel("Balanced accuracy")
     ax.set_title("Balanced accuracy — diverse vs random")
     plt.tight_layout()
-    plt.savefig(f"{OUTPUT_DIR}/balanced_accuracy.png", dpi=150)
+    plt.savefig(f"{output_dir}/balanced_accuracy.png", dpi=150)
     plt.show()
 
 # Main function to run the entire evaluation pipeline
@@ -337,23 +469,21 @@ def main(
     val_root: str | None = None,
     train_videos: list | None = None,
     val_video: str | None = None,
-    target_size: tuple[int, int] = (224, 224),
     output_dir: str = "outputs",
     model_name: str | None = None,
+    num_classes: int | None = None,
     num_epochs: int = 30,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     if dataset_style == "pitvis":
         frames_train, _, color_map, labels_train_raw = dm.load_frames_and_masks(
-            dataset_root=dataset_root,
-            target_size=target_size,
+            data_folder=dataset_root,
             videos=[str(v) for v in train_videos] if train_videos else None,
             dataset_style="pitvis",
         )
         frames_val, _, _, labels_val_raw = dm.load_frames_and_masks(
-            dataset_root=dataset_root,
-            target_size=target_size,
+            data_folder=dataset_root,
             videos=[str(val_video)] if val_video is not None else None,
             dataset_style="pitvis",
         )
@@ -366,7 +496,8 @@ def main(
         )
         all_steps = np.unique(np.concatenate([labels_train_raw[:, 0], labels_val_raw[:, 0]]))
         class_map = {s: i for i, s in enumerate(all_steps)}
-        num_classes = len(class_map)
+        inferred_classes = len(class_map)
+        num_classes = num_classes if num_classes is not None else inferred_classes
         class_names = [step_names.get(s, str(s)).strip() for s in all_steps]
 
         def remap(col: np.ndarray) -> np.ndarray:
@@ -377,15 +508,13 @@ def main(
 
     else:
         frames_train, masks_train, color_map = dm.load_frames_and_masks(
-            dataset_root=dataset_root,
-            target_size=target_size,
+            data_folder=dataset_root,
             videos=[str(v) for v in train_videos] if train_videos else None,
             dataset_style=dataset_style,
         )
         _val_root = val_root if val_root is not None else dataset_root
         frames_val, masks_val, _ = dm.load_frames_and_masks(
-            dataset_root=_val_root,
-            target_size=target_size,
+            data_folder=_val_root,
             videos=[str(val_video)] if val_video is not None else None,
             dataset_style=dataset_style,
             global_color_map=color_map,
@@ -393,8 +522,11 @@ def main(
 
         all_labels_train = masks_train.reshape(len(masks_train), -1)[:, 0].astype(np.int64)
         labels_val = masks_val.reshape(len(masks_val), -1)[:, 0].astype(np.int64)
-        num_classes = len(color_map)
+        inferred_classes = len(color_map)
+        num_classes = num_classes if num_classes is not None else inferred_classes
         class_names = [str(i) for i in range(num_classes)]
+
+    print(f"Using {num_classes} classes: {class_names}")
 
     all_frames = frames_train
 
@@ -452,25 +584,25 @@ def main(
     elif task == "segmentation":
         print("\nTraining on diverse dataset...")
         _, hist_div, preds_div, gts_div, bal_div = train_segmentation_model(
-            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs
+            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs, model_name,
         )
         print("\nTraining on random dataset...")
         _, hist_rand, preds_rand, gts_rand, bal_rand = train_segmentation_model(
-            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs
+            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs, model_name,
         )
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 
-    plot_training_curves(hist_div, hist_rand)
+    plot_training_curves(hist_div, hist_rand, output_dir)
     plot_confusion_matrices(
         preds_div, gts_div, preds_rand, gts_rand,
-        bal_div, bal_rand, num_classes, class_names,
+        bal_div, bal_rand, num_classes, class_names, output_dir,
     )
     plot_per_class_f1(
         preds_div, gts_div, preds_rand, gts_rand,
-        bal_div, bal_rand, num_classes, class_names,
+        bal_div, bal_rand, num_classes, class_names, output_dir,
     )
-    plot_balanced_accuracy(bal_div, bal_rand)
+    plot_balanced_accuracy(bal_div, bal_rand, output_dir)
 
     print(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
 

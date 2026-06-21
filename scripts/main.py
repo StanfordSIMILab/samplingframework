@@ -15,184 +15,131 @@ import numpy as np
 import argparse
 
 from diversity_sampler import DiversitySampler
-from data_manager import load_frames_and_masks, infer_split_from_path
-from data_partitioner import train_val_test_split, split_by_directory_name
+from auxiliary.data_manager import load_frames_and_masks, load_frames_from_dir
+from auxiliary.data_partitioner import train_val_test_split, split_by_directory, infer_split_from_path
+import eval_data as eval
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Split dataset into train, val, and test sets, and create the training set using diversity sampling or random sampling"
     )
+    
+    # Data processing parameters
     parser.add_argument(
-        "--base-dir", default="./Cholec8K/data", type=str,
-        help="Root directory of the dataset"
+        "--data-folder", required=True, type=str,
+        help="Root data folder containing raw images/videos and masks"
     )
     parser.add_argument(
-        "--data-dir", default="raw", type=str,
-        help="Directory of the frames and masks"
-    )
-    parser.add_argument(
-        "--parse-unannotated", action='store_true',
-        help="Whether to parse unannotated dataset from scratch"
-    )
-    parser.add_argument(
-        "--skip-split", action='store_true',
-        help="Whether to skip the train-val-test split and directly perform sampling on the entire dataset"
-    )
-    parser.add_argument(
-        "--train-prop", default=0.1, type=float,
-        help="Proportion of the dataset to be used for training"
-    )
-    parser.add_argument(
-        "--test-prop", default=0.1, type=float,
-        help="Proportion of the dataset to be used as the test set"
-    )
-    parser.add_argument(
-        "--val-prop", default=0.1, type=float,
-        help="Proportion of the dataset to be used as the validation set"
-    )
-    parser.add_argument(
-        "--split-by-dir", action='store_true',
-        help="Split dataset based on directory names (train/validation/test) rather than random splitting"
-    )
-    parser.add_argument(
-        "--div-eval", action='store_true',
-        help="Whether to run evaluation metrics when diversity sampling the training set"
-    )
-    parser.add_argument(
-        "--filter-clusters-manually", action='store_true',
-        help="Whether user wants capacity to manually filter clusters from embed/cluster results"
-    )
-    parser.add_argument(
-        "--parse-annotated", action='store_true',
-        help="Whether to parse raw dataset from scratch, saving all frames and masks to processed_data/"
+        "--annotated", action="store_true",
+        help="Whether the dataset has paired mask annotations"
     )
     parser.add_argument(
         "--mask-type", default="color_mask", type=str,
-        help="Mask type to use when parsing raw data: 'color_mask', 'mask', or 'watershed_mask'"
+        help="Mask type: 'color_mask', 'mask', or 'watershed_mask'"
+    )
+
+    # Data Partioning (train/val/test) parameters
+    parser.add_argument(
+        "--skip-split", action="store_true",
+        help="Skip train/val/test splitting and sample directly from all processed frames"
+    )
+    parser.add_argument(
+        "--split-by-dir", action="store_true",
+        help="Infer train/val/test splits from directory names rather than random splitting"
+    )
+    parser.add_argument(
+        "--train-prop", default=0.1, type=float,
+        help="Proportion of training frames to select via sampling"
+    )
+    parser.add_argument(
+        "--test-prop", default=0.1, type=float,
+        help="Proportion of the dataset to use as the test set"
+    )
+    parser.add_argument(
+        "--val-prop", default=0.1, type=float,
+        help="Proportion of the dataset to use as the validation set (0 to skip)"
+    )
+
+    # Diversity Sampling parameters
+    parser.add_argument(
+        "--div-eval", action="store_true",
+        help="Run model training evaluation comparing diversity vs random sampling"
+    )
+    parser.add_argument(
+        "--filter-clusters-manually", action="store_true",
+        help="Manually filter clusters from embedding/cluster results"
+    )
+    # Dataset evaluation and structure parameters
+    parser.add_argument(
+        "--task-evaluation", default="segmentation", type=str,
+        help="Task for model evaluation: 'segmentation' or 'phase_classification'"
     )
     parser.add_argument(
         "--dataset-style", default="cholec", type=str,
-        help="Dataset folder structure style: 'cholec', 'flat', or 'nested'"
+        help="Dataset folder structure: 'cholec', 'flat', 'nested', or 'pitvis'"
+    )
+    parser.add_argument(
+        "--model-name", default=None, type=str,
+        help="Model to use for eval training: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'"
     )
 
     args = parser.parse_args()
 
-    data_dir      = os.path.join(args.base_dir, args.data_dir)
-    processed_dir = os.path.join(args.base_dir, "processed_data")
-    split_dir     = os.path.join(args.base_dir, "split_data") if not args.skip_split else None
+    data_folder = Path(args.data_folder)
+    split_data_dir = data_folder / "split_data"
 
     sampler = DiversitySampler(
-        emb_model='openclip',
-        method='kmeans_elbow',
+        emb_model="openclip",
+        method="kmeans_elbow",
     )
 
-    len_total_frames = None
-
-    if args.parse_annotated:
-        if args.split_by_dir:
-            print("Splitting raw dataset by directory name...")
-            split_subdirs = {}
-            for d in sorted(Path(data_dir).iterdir()):
-                if d.is_dir():
-                    split_name = infer_split_from_path(d.parts)
-                    split_subdirs.setdefault(split_name, []).append(d)
-
-            frames_by_split = {}
-            masks_by_split = {}
-            color_map = None
-            global_color_map = None
-
-            for split_name, subdirs in split_subdirs.items():
-                split_frames_list = []
-                split_masks_list = []
-                for subdir in subdirs:
-                    f, m, global_color_map = load_frames_and_masks(
-                        dataset_root=subdir,
-                        mask_type=args.mask_type,
-                        dataset_style=args.dataset_style,
-                        global_color_map=global_color_map,
-                    )
-                    split_frames_list.append(f)
-                    split_masks_list.append(m)
-                frames_by_split[split_name] = np.concatenate(split_frames_list, axis=0)
-                masks_by_split[split_name]  = np.concatenate(split_masks_list, axis=0)
-                color_map = global_color_map
-
-            split_by_directory_name(
-                frames_by_split=frames_by_split,
-                masks_by_split=masks_by_split if masks_by_split else None,
-                color_map=color_map,
-                out_folder=split_dir,
-            )
-
+    # Load and process data
+    if args.annotated:
+        print("Loading annotated dataset...")
+        result = load_frames_and_masks(
+            data_folder=data_folder,
+            mask_type=args.mask_type,
+            dataset_style=args.dataset_style,
+        )
+        if len(result) == 4:
+            frames, masks, color_map, labels = result
         else:
-            print("Parsing raw dataset...")
-            frames, masks, color_map = load_frames_and_masks(
-                dataset_root=data_dir,
-                mask_type=args.mask_type,
-                dataset_style=args.dataset_style,
-            )
-
-            os.makedirs(processed_dir, exist_ok=True)
-            print(f"Saving processed frames and masks to {processed_dir}...")
-            np.save(os.path.join(processed_dir, "all_frames.npy"), frames)
-            if masks is not None:
-                np.save(os.path.join(processed_dir, "all_masks.npy"), masks)
-            if color_map:
-                with open(os.path.join(processed_dir, "color_map.json"), "w") as f:
-                    json.dump({str(k): v for k, v in color_map.items()}, f, indent=2)
-            print(f"Saved {len(frames)} frames and masks.")
-
-            if not args.skip_split:
-                print("Performing train-val-test split...")
-                len_total_frames = len(frames)
-                train_val_test_split(
-                    data_arr=frames,
-                    mask_arr=masks,
-                    test_size=args.test_prop,
-                    val_size=args.val_prop,
-                    shuffle=True,
-                    seed=42,
-                    out_folder=split_dir,
-                )
-
+            frames, masks, color_map = result
+            labels = None
     else:
-        if not args.skip_split:
-            if not os.path.exists(os.path.join(processed_dir, "all_frames.npy")):
-                raise FileNotFoundError(
-                    "processed_data/all_frames.npy not found. "
-                    "Run with --parse-annotated first, or use --parse-annotated --split-by-dir "
-                    "if your data is already organized by directory name."
-                )
-            print("Loading processed frames and masks...")
-            frames = np.load(os.path.join(processed_dir, "all_frames.npy"))
-            masks_path = os.path.join(processed_dir, "all_masks.npy")
-            masks = np.load(masks_path) if os.path.exists(masks_path) else None
-            len_total_frames = len(frames)
+        print("Loading unannotated dataset...")
+        frames = load_frames_from_dir(data_folder=data_folder)
+        masks  = None
+        labels = None
 
-            print("Performing train-val-test split...")
-            train_val_test_split(
-                data_arr=frames,
-                mask_arr=masks,
-                test_size=args.test_prop,
-                val_size=args.val_prop,
-                shuffle=True,
-                seed=42,
-                out_folder=split_dir,
-            )
+    len_total_frames = len(frames)
 
-    print("Loading train split...")
-    train_frames = np.load(os.path.join(split_dir, "train", "frames.npy"))
-    train_masks_path = os.path.join(split_dir, "train", "masks.npy")
-    train_masks = np.load(train_masks_path) if os.path.exists(train_masks_path) else None
+    # Split data
+    if args.split_by_dir:
+        print("Splitting by directory name...")
+        split_by_directory(data_folder=data_folder)
+    elif not args.skip_split:
+        print("Performing random train/val/test split...")
+        train_val_test_split(
+            data_folder=data_folder,
+            test_size=args.test_prop,
+            val_size=args.val_prop,
+        )
 
-    if len_total_frames is not None:
-        num_train_samples = int(args.train_prop * len_total_frames)
+    # Load train split for sampling
+    if args.skip_split:
+        train_frames = frames
+        train_masks  = masks
     else:
-        num_train_samples = int(args.train_prop * len(train_frames))
+        print("Loading train split...")
+        train_frames = np.load(split_data_dir / "train" / "frames.npy")
+        train_masks_path = split_data_dir / "train" / "masks.npy"
+        train_masks = np.load(train_masks_path) if train_masks_path.exists() else None
 
-    print("Performing diversity sampling to create the diverse training set...")
-    diversity_out = os.path.join(split_dir, "train", "diversity")
+    num_train_samples = int(args.train_prop * len_total_frames)
+
+    # Diversity Sampling
+    diversity_out = (split_data_dir / "train") if not args.skip_split else (data_folder / "split_data" / "train")
     _, div_frames, div_masks, div_indices = sampler.sample(
         data_arr=train_frames,
         mask_arr=train_masks,
@@ -200,15 +147,56 @@ if __name__ == "__main__":
         run_eval=args.div_eval,
         run_manual_filter=args.filter_clusters_manually,
         save_data=True,
-        data_dir=diversity_out,
+        data_dir=str(diversity_out),
     )
 
-    print("Performing random sampling to create the random training set...")
+    # Random sampling
+    print("Performing random sampling...")
     random_indices = np.random.choice(len(train_frames), size=num_train_samples, replace=False)
-    random_out = os.path.join(split_dir, "train", "random")
-    os.makedirs(random_out, exist_ok=True)
-    np.save(os.path.join(random_out, "frames.npy"), train_frames[random_indices])
+    random_out = (split_data_dir / "train" / "random") if not args.skip_split else (data_folder / "split_data" / "train" / "random")
+    random_out.mkdir(parents=True, exist_ok=True)
+    np.save(random_out / "frames.npy", train_frames[random_indices])
     if train_masks is not None:
-        np.save(os.path.join(random_out, "masks.npy"), train_masks[random_indices])
+        np.save(random_out / "masks.npy", train_masks[random_indices])
+
+    if args.div_eval:
+        print("Running model training evaluation...")
+
+        train_videos = None
+        val_video = None
+
+        if args.dataset_style == "pitvis":
+            train_videos = []
+            print("Enter video IDs to use for training (one or more per line, blank line to finish):")
+            while True:
+                raw = input().strip()
+                if raw == "":
+                    break
+                for item in raw.split():
+                    try:
+                        train_videos.append(int(item))
+                    except ValueError:
+                        print(f"Skipping non-integer value: {item!r}")
+
+            while True:
+                raw = input("Enter video ID to use for validation: ").strip()
+                try:
+                    val_video = int(raw)
+                    break
+                except ValueError:
+                    print("Please enter a valid integer.")
+
+            print(f"Training videos: {train_videos}")
+            print(f"Validation video: {val_video}")
+
+        eval.main(
+            task=args.task_evaluation,
+            dataset_root=args.data_folder,
+            dataset_style=args.dataset_style,
+            train_videos=train_videos,
+            val_video=val_video,
+            output_dir=str(data_folder / "eval_outputs"),
+            model_name=args.model_name if hasattr(args, "model_name") else None,
+        )
 
     print("Done!")

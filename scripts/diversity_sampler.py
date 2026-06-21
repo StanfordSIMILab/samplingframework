@@ -964,6 +964,7 @@ class DiversitySampler:
                 _last_closest_points = closest_points
 
         filtered_frames, all_indices = self.filter_frames(data_arr, _last_closest_points)
+        filtered_masks = mask_arr[all_indices] if mask_arr is not None else None
 
         if save_data:
             print(f"Saving files and metadata to: {out_path}...")
