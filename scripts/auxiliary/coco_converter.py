@@ -1,7 +1,13 @@
 import os
 import json
 import numpy as np
+import cv2
+from PIL import Image
+from typing import Dict
+import tqdm
+import pycocotools.mask as mask_utils
 
+# convert annotations in dataset to COCO format for use with coco evaluation tools
 def convert_to_coco(self, image_path, annotation_path, categories=None):
     if categories is None:
         # Default categories are derived from our Microvascular Decompression dataset,
@@ -89,6 +95,7 @@ def convert_to_coco(self, image_path, annotation_path, categories=None):
 
     return coco_images, coco_annotations
 
+# Utility function to convert selected frames to COCO format
 def convert_selected_frames_to_coco(self, selected_frames, output_file_path, categories=None):
     if categories is None:
             # Default categories are derived from our Microvascular Decompression dataset,
@@ -210,6 +217,7 @@ def convert_selected_frames_to_coco(self, selected_frames, output_file_path, cat
 
     print(f"COCO file created at: {output_file_path}")
 
+# Utility function to convert COCO annotations to PNG masks in a given directory
 def convert_coco_to_png_masks(
     coco_annotations: Dict,
     images_dir: str,
