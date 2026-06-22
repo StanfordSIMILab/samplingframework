@@ -51,8 +51,7 @@ def compute_fvi(frames) -> np.ndarray:
     return np.array(fvi_scores)
 
 
-def fvi_filter(frames: np.ndarray, thresh: float = None, use_elbow=True):
-    
+def fvi_filter(frames: np.ndarray, thresh: float = None, percentile: int = 90, use_elbow=True):
     scores = compute_fvi(frames)
     if len(scores) == 0:
         return frames, np.arange(len(frames)), scores, thresh
@@ -60,8 +59,8 @@ def fvi_filter(frames: np.ndarray, thresh: float = None, use_elbow=True):
     if use_elbow and thresh is None:
         thresh = elbow_threshold(scores)
     elif thresh is None:
-        # Filter out the 10% of frames with the lowest FVI scores by default
-        thresh = np.percentile(scores, 90)
+        # Filter out the (100-percentile)% of frames with the lowest FVI scores by default
+        thresh = np.percentile(scores, percentile)
 
     kept = [0]
     kept.extend(
@@ -141,6 +140,7 @@ def show_fvi_histogram(scores: np.ndarray, video_id: int = None, save_path: str 
     plt.tight_layout()
 
     if save_path:
+        os.makedirs(save_path, exist_ok=True)
         plt.savefig(save_path, bbox_inches="tight")
     else:
         plt.show()

@@ -28,7 +28,7 @@ from scipy.spatial.distance import cdist
 from scipy.stats import chi2
 import umap
 
-from auxiliary.fvi_computation import elbow_threshold, compute_fvi, fvi_filter, show_fvi_histogram
+from auxiliary.fvi_computation import fvi_filter, show_fvi_histogram
 
 class DiversitySampler:
     def __init__(
@@ -325,7 +325,8 @@ class DiversitySampler:
 
     # Visualization Plots for visualizing diversity sampling / comparing with random sampling
     def plot_hausdorff_spread(self, full_n: np.ndarray, diverse_n: np.ndarray, random_n: np.ndarray | None, n_sampled: int, save_path: str = "./data_quality", save_plot: bool = False) -> None:
-        os.makedirs(save_path, exist_ok=True)
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
 
         hd_div, mn_div = self.calc_hausdorff_coverage(full_n, diverse_n)
         hd_ran, mn_ran = self.calc_hausdorff_coverage(full_n, random_n)
@@ -352,7 +353,8 @@ class DiversitySampler:
         plt.close()
     
     def plot_nn_coverage(self, full_n: np.ndarray, diverse_n: np.ndarray, random_n: np.ndarray | None, save_path: str = "./data_quality", save_plot: bool = False) -> None:
-        os.makedirs(save_path, exist_ok=True)
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
 
         for sub_n, label in [(diverse_n, "diverse"), (random_n, "random")]:
             nn = NearestNeighbors(n_neighbors=1).fit(sub_n)
@@ -377,7 +379,8 @@ class DiversitySampler:
             plt.close()
 
     def plot_pca_scatter(self, full_n: np.ndarray, diverse_n: np.ndarray, random_n: np.ndarray | None, save_path: str = "./data_quality", save_plot: bool = False) -> None:
-        os.makedirs(save_path, exist_ok=True)
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
 
         pca = PCA(n_components=2)
         full_2d = pca.fit_transform(full_n)
@@ -409,7 +412,8 @@ class DiversitySampler:
         plt.close()
 
     def plot_umap(self, full_n: np.ndarray, diverse_indices: np.ndarray, random_indices: np.ndarray | None, save_path: str = "./data_quality", save_plot: bool = False) -> None:
-        os.makedirs(save_path, exist_ok=True)
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
         
         print("Fitting UMAP...")
         emb_2d = umap.UMAP(n_components=2, random_state=42).fit_transform(full_n)
@@ -432,7 +436,7 @@ class DiversitySampler:
         plt.close()
 
     # Evaluation Functions
-    def evaluate(self, data_arr, all_emb, cluster_labels, centroids, n=10, save_path="./metrics", save_plot=False) -> None:
+    def evaluate(self, data_arr, all_emb, cluster_labels, centroids, n=10, save_path="./diversity", save_plot=False) -> None:
         """ 
         
         Evaluate clustering and diversity metrics including: 
@@ -443,6 +447,9 @@ class DiversitySampler:
             and SSIM between cluster representatives.
         
         """
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
+
         unique_labels = [l for l in np.unique(cluster_labels) if l != -1]
 
         valid_mask = cluster_labels != -1
@@ -625,7 +632,8 @@ class DiversitySampler:
         save_plot: bool = False,
     ) -> None:
 
-        os.makedirs(save_dir, exist_ok=True)
+        if save_plot:
+            os.makedirs(save_dir, exist_ok=True)
 
         # Load embeddings from disk if not supplied directly.
         if all_emb is None:
@@ -698,7 +706,10 @@ class DiversitySampler:
         return isolation_distance, l_ratio
 
     # For each cluster, compute isolation distance and L-ratio, then identify outliers based on isolation distance distribution
-    def eval_iso(self, data_arr, all_emb, cluster_labels, centroids, include_outliers=True, save_data=False, save_path="./metrics", save_plot=False):
+    def eval_iso(self, data_arr, all_emb, cluster_labels, centroids, include_outliers=True, save_path="./diversity", save_plot=False):
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
+
         unique_labels = [l for l in np.unique(cluster_labels) if l != -1]
         all_iso = []
         for cid in unique_labels:
@@ -751,6 +762,9 @@ class DiversitySampler:
     
     # Evaluate tightness of each cluster
     def eval_tightness(self, all_emb, cluster_labels, centroids, save_path="./diversity", save_plot=False):
+        if save_plot:
+            os.makedirs(save_path, exist_ok=True)
+
         unique_labels = [l for l in np.unique(cluster_labels) if l != -1]
         avg_dists = []
         std_dists = []
@@ -896,28 +910,34 @@ class DiversitySampler:
         emb_prev=None,
         emb_model=None, 
         method=None,
-        fvi_filtering=True, 
+        filter=None, 
         run_eval=True, 
         run_manual_filter=False, 
-        eval4_n=10, 
+        eval4_n=10,
         save_data=False,
         data_dir="."
     ):
+
+        # Check there is data available
         if data_arr is None or len(data_arr) == 0:
             raise ValueError(
                 "Error in training data creation, please make sure to input a correct numpy data array"
             )
+        original_num_frames = len(data_arr)
 
+        # Determine diversity output path if indicated
         if save_data:
             out_path = os.path.join(data_dir, "diversity")
             os.makedirs(out_path, exist_ok=True)
         else:
-            out_path = os.path.join(data_dir, "diversity")
+            out_path = None
 
+        # Determine number of samples in final diversity sampled dataset
         if num_samples is None:
             # Sample 10% of frames by default unless user specifies otherwise
             num_samples = int(len(data_arr) * percent_sample)
 
+        # Determine embeddings for entire data array
         if emb_prev is not None:
             print("Using previously computed embeddings...")
             all_emb = emb_prev
@@ -931,78 +951,137 @@ class DiversitySampler:
             else:
                 raise ValueError("Must specify a valid embedding model. Choose 'dino' or 'openclip'.")
 
+        filtered_indexes = None
+        if filter is not None:
+            if filter == "fvi":
+                while True:
+                    raw = input(
+                        "FVI filtering method — elbow, percentile, custom (or Enter to skip): "
+                    ).strip().lower()
+
+                    if raw == "":
+                        break
+
+                    if raw == "elbow":
+                        filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
+                        show_fvi_histogram(scores=scores, save_path=out_path)
+                        data_arr = filtered_data_arr
+                        if mask_arr is not None:
+                            mask_arr = mask_arr[filtered_indexes]
+                        break
+
+                    elif raw == "percentile":
+                        while True:
+                            raw2 = input("Percentile (0-100): ").strip()
+                            try:
+                                percentile = int(raw2)
+                                if not 0 <= percentile <= 100:
+                                    print("  Enter an integer between 0 and 100.")
+                                    continue
+                                filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
+                                    data_arr=data_arr, percentile=percentile, use_elbow=False
+                                )
+                                show_fvi_histogram(scores=scores, save_path=out_path)
+                                data_arr = filtered_data_arr
+                                if mask_arr is not None:
+                                    mask_arr = mask_arr[filtered_indexes]
+                                break
+                            except ValueError:
+                                print("  Enter a valid integer.")
+                        break
+
+                    elif raw == "custom":
+                        while True:
+                            raw2 = input("Threshold (float): ").strip()
+                            try:
+                                thresh = float(raw2)
+                                filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
+                                    data_arr=data_arr, thresh=thresh, use_elbow=False
+                                )
+                                show_fvi_histogram(scores=scores, save_path=out_path)
+                                data_arr = filtered_data_arr
+                                if mask_arr is not None:
+                                    mask_arr = mask_arr[filtered_indexes]
+                                break
+                            except ValueError:
+                                print("  Enter a valid float.")
+                        break
+
+                    else:
+                        print("  Enter 'elbow', 'percentile', or 'custom'.")
+
+            else:
+                raise ValueError(f"Unknown filter {filter!r}. Choose 'fvi'.")
+
+        # Filter embeddings if specified
+        emb_for_clustering = all_emb[filtered_indexes] if filtered_indexes is not None else all_emb
+
         print("Performing clustering...")
         _method = method or self.method
         if _method == "hdbscan":
-            n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(all_emb, num_samples)
+            n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(emb_for_clustering, num_samples)
         elif _method == "dbscan":
-            n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(all_emb, num_samples)
+            n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(emb_for_clustering, num_samples)
         elif _method == "kmeans_elbow":
-            n_clusters, cluster_labels, centroids, closest_points, all_emb = self.run_knn(
-                all_emb=all_emb, num_train=num_samples, method="elbow"
+            n_clusters, cluster_labels, centroids, closest_points,  emb_for_clustering = self.run_knn(
+                all_emb=emb_for_clustering, num_train=num_samples, method="elbow"
             )
         elif _method == "kmeans_sil":
-            n_clusters, cluster_labels, centroids, closest_points, all_emb = self.run_knn(
-                all_emb=all_emb, num_train=num_samples, method="silhouette"
+            n_clusters, cluster_labels, centroids, closest_points, emb_for_clustering = self.run_knn(
+                all_emb=emb_for_clustering, num_train=num_samples, method="silhouette"
             )
         else:
             raise ValueError(
                 "Must specify a valid clustering method. Choose 'hdbscan', 'dbscan', 'kmeans_elbow', 'kmeans_sil'."
             )
 
-        _last_n_clusters = n_clusters
         _last_closest_points = closest_points
 
         if run_eval:
             print("running dataset quality evaluation...")
-            self.eval_iso(data_arr=data_arr, all_emb=all_emb, cluster_labels=cluster_labels,
+            self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
                           centroids=centroids, include_outliers=True, save_path=out_path, save_plot=save_data)
-            self.eval_tightness(all_emb=all_emb, cluster_labels=cluster_labels, centroids=centroids, save_path=out_path, save_plot=save_data)
-            self.evaluate(data_arr=data_arr, all_emb=all_emb, cluster_labels=cluster_labels,
+            self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids, save_path=out_path, save_plot=save_data)
+            self.evaluate(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
                           centroids=centroids, n=eval4_n, save_path=out_path, save_plot=save_data)
 
             if run_manual_filter:
-                n_clusters, all_emb, cluster_labels, centroids, closest_points = self.filter_clusters_manually(all_emb, num_samples, cluster_labels, centroids, closest_points)
+                n_clusters, emb_for_clustering, cluster_labels, centroids, closest_points = self.filter_clusters_manually(emb_for_clustering, num_samples, cluster_labels, centroids, closest_points)
                 _last_closest_points = closest_points
 
         filtered_frames, all_indices = self.filter_frames(data_arr, _last_closest_points)
         filtered_masks = mask_arr[all_indices] if mask_arr is not None else None
 
+        if filtered_indexes is not None:
+            all_indices = filtered_indexes[all_indices]
+
         if save_data:
             print(f"Saving files and metadata to: {out_path}...")
+
             frame_out_path = os.path.join(out_path, "frames")
             os.makedirs(frame_out_path, exist_ok=True)
             print(f"Also saving filtered frames to: {frame_out_path}...")
             self.export_frames(chosen_frames=filtered_frames, out_folder_name=frame_out_path, is_mask=False)
-
             np.save(os.path.join(out_path, "frames.npy"), filtered_frames)
 
-            filtered_masks = None
-            if mask_arr is not None:
-                filtered_masks = mask_arr[all_indices]
-                if save_data:
-                    mask_out_path = os.path.join(out_path, "masks")
-                    os.makedirs(mask_out_path, exist_ok=True)
-                    print(f"Also saving filtered masks to: {mask_out_path}...")
-                    self.export_frames(chosen_frames=filtered_masks, out_folder_name=mask_out_path, is_mask=True)
-
             if filtered_masks is not None:
+                mask_out_path = os.path.join(out_path, "masks")
+                os.makedirs(mask_out_path, exist_ok=True)
+                print(f"Also saving filtered masks to: {mask_out_path}...")
+                self.export_frames(chosen_frames=filtered_masks, out_folder_name=mask_out_path, is_mask=True)
                 np.save(os.path.join(out_path, "masks.npy"), filtered_masks)
 
-            # Save embeddings and diverse indices so evaluate_vs_random() can be
-            # called later with caller-supplied random_indices, without re-running
-            # the full pipeline.
             np.save(os.path.join(out_path, "all_embeddings.npy"), all_emb)
             np.save(os.path.join(out_path, "diverse_indices.npy"), np.array(all_indices))
 
             metadata = {
+                'original_num_frames' = original_num_frames
                 "n_clusters": int(n_clusters),
-                "num_frames": len(data_arr),
-                "all_indices": [int(i) for i in all_indices],
                 "cluster_labels": [int(i) for i in cluster_labels],
+                "num_frames_selected": len(data_arr),
+                "all_indices": [int(i) for i in all_indices],
             }
-            metadata_path = os.path.join(out_path, "diversity_metadata.json")
-            with open(metadata_path, "w") as f:
+            with open(os.path.join(out_path, "diversity_metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=2)
 
         return num_samples, filtered_frames, filtered_masks, all_indices
