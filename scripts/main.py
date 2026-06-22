@@ -70,8 +70,8 @@ if __name__ == "__main__":
         help="Run model training evaluation comparing diversity vs random sampling"
     )
     parser.add_argument(
-        "--filter-clusters-manually", action="store_true",
-        help="Manually filter clusters from embedding/cluster results"
+        "--keep-interactive", action="store_true",
+        help="Allow for manual diversity clustering modifications and viewing"
     )
     # Dataset evaluation and structure parameters
     parser.add_argument(
@@ -95,6 +95,7 @@ if __name__ == "__main__":
     sampler = DiversitySampler(
         emb_model="openclip",
         method="kmeans_elbow",
+        keep_interactive = args.keep_interactive
     )
 
     # Load and process data
@@ -149,7 +150,6 @@ if __name__ == "__main__":
         mask_arr=train_masks,
         num_samples=num_train_samples,
         run_eval=args.div_eval,
-        run_manual_filter=args.filter_clusters_manually,
         save_data=True,
         data_dir=str(diversity_out),
     )
