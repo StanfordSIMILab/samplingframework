@@ -7,9 +7,15 @@ venv/
 env/
 
 # Ignore other common files and directories
+*.txt
 *.log
 *.tmp
 .DS_Store
+
+# Ignore any sampling files
+processed/
+split_data/
+eval_outputs/
 
 /data/*
 /output/*
