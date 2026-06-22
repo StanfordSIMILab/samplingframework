@@ -26,8 +26,8 @@ if __name__ == "__main__":
 
     # Data processing parameters
     parser.add_argument(
-        "--data-folder", required=True, type=str,
-        help="Root data folder containing raw images/videos and masks"
+        "--data-dir", required=True, type=str,
+        help="Root data folder directory containing raw images/videos and masks"
     )
     parser.add_argument(
         "--annotated", action="store_true",
@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    data_folder = Path(args.data_folder)
+    data_folder = Path(args.data_dir)
     split_data_dir = data_folder / "split_data"
 
     sampler = DiversitySampler(
