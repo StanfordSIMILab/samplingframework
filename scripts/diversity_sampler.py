@@ -28,6 +28,7 @@ from scipy.spatial.distance import cdist
 from scipy.stats import chi2
 import umap
 
+from auxiliary.fvi_computation import elbow_threshold, compute_fvi, fvi_filter, show_fvi_histogram
 
 class DiversitySampler:
     def __init__(
@@ -894,7 +895,8 @@ class DiversitySampler:
         percent_sample=0.1, 
         emb_prev=None,
         emb_model=None, 
-        method=None, 
+        method=None,
+        fvi_filtering=True, 
         run_eval=True, 
         run_manual_filter=False, 
         eval4_n=10, 

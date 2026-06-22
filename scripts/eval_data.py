@@ -2,7 +2,9 @@
 # Evaluation utilities for determining effectiveness of diversity sampling vs. random sampling
 import os
 import cv2
+import logging
 
+from PIL import Image
 import numpy as np
 import pandas as pd
 import torch
@@ -36,6 +38,23 @@ _HF_IDS = {
     "segformer":   "nvidia/segformer-b5-finetuned-ade-640-640",
     "upernet":     "openmmlab/upernet-swin-large",
 }
+
+# Logger for obtaining evaluation metrics
+def setup_logger(output_dir: str) -> logging.Logger:
+    os.makedirs(output_dir, exist_ok=True)
+    logger = logging.getLogger("eval_metrics")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    fh = logging.FileHandler(os.path.join(output_dir, "evaluation_metrics.txt"), mode="w")
+    fh.setLevel(logging.INFO)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(message)s")
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
 
 # Dataset utilities
 class SurgicalDataset(Dataset):
@@ -142,7 +161,10 @@ def train_loop(
     class_names: list,
     model: nn.Module,
     num_epochs: int = 30,
+    logger: logging.Logger | None = None,
 ):
+    log = logger.info if logger else print
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
@@ -199,7 +221,7 @@ def train_loop(
         history["val_loss"].append(vl / vt)
         history["train_acc"].append(tc / tt)
         history["val_acc"].append(vc / vt)
-        print(
+        log(
             f"[{label}] {epoch + 1}/{num_epochs}"
             f"  loss={history['train_loss'][-1]:.3f}"
             f"  val_acc={history['val_acc'][-1]:.3f}"
@@ -208,10 +230,11 @@ def train_loop(
     preds = np.array(all_preds)
     gts = np.array(all_gts)
     bal_acc = balanced_accuracy_score(gts, preds)
-    print(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
-    print(classification_report(gts, preds, target_names=class_names, zero_division=0))
+    log(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
+    log(classification_report(gts, preds, target_names=class_names, zero_division=0))
 
     return model, history, preds, gts, bal_acc
+
 
 def train_loop_hf(
     x_train: np.ndarray,
@@ -225,8 +248,9 @@ def train_loop_hf(
     processor,
     model_name: str,
     num_epochs: int = 30,
+    logger: logging.Logger | None = None,
 ):
-    from PIL import Image as PILImage
+    log = logger.info if logger else print
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
@@ -296,13 +320,11 @@ def train_loop_hf(
                     all_preds.extend(preds[valid].cpu().numpy())
                     all_gts.extend(target[valid].cpu().numpy())
 
-        n_train = len(x_train)
-        n_val = len(x_val)
-        history["train_loss"].append(tl / n_train)
-        history["val_loss"].append(vl / n_val)
+        history["train_loss"].append(tl / len(x_train))
+        history["val_loss"].append(vl / len(x_val))
         history["train_acc"].append(tc / max(tt, 1))
         history["val_acc"].append(vc / max(vt, 1))
-        print(
+        log(
             f"[{label}] {epoch + 1}/{num_epochs}"
             f"  loss={history['train_loss'][-1]:.3f}"
             f"  val_acc={history['val_acc'][-1]:.3f}"
@@ -311,8 +333,8 @@ def train_loop_hf(
     preds = np.array(all_preds)
     gts = np.array(all_gts)
     bal_acc = balanced_accuracy_score(gts, preds)
-    print(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
-    print(classification_report(gts, preds, target_names=class_names, zero_division=0))
+    log(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
+    log(classification_report(gts, preds, target_names=class_names, zero_division=0))
 
     return model, history, preds, gts, bal_acc
 
@@ -320,18 +342,19 @@ def train_loop_hf(
 # Training scripts for phase_classifier vs. segmentation
 def train_phase_classifier(
     x_train, train_labels, x_val, val_labels,
-    label, num_classes, class_names, num_epochs=30,
+    label, num_classes, class_names, num_epochs=30, logger: logging.Logger | None = None,
 ):
     model = LightCNN(num_classes)
     return train_loop(
         x_train, train_labels, x_val, val_labels,
-        label, num_classes, class_names, model, num_epochs,
+        label, num_classes, class_names, model, num_epochs, logger,
     )
 
 
 def train_segmentation_model(
     x_train, train_labels, x_val, val_labels,
     label, num_classes, class_names, num_epochs=30, model_name: str | None = None,
+    logger: logging.Logger | None = None,
 ):
     processor, model = build_model(num_classes, model_name=model_name)
 
@@ -351,12 +374,12 @@ def train_segmentation_model(
 
         return train_loop_hf(
             x_train, train_labels, x_val, val_labels,
-            label, num_classes, class_names, model, processor, model_name, num_epochs,
+            label, num_classes, class_names, model, processor, model_name, num_epochs, logger,
         )
 
     return train_loop(
         x_train, train_labels, x_val, val_labels,
-        label, num_classes, class_names, model, num_epochs,
+        label, num_classes, class_names, model, num_epochs, logger,
     )
 
 # Plot utilities
@@ -475,6 +498,10 @@ def main(
     num_epochs: int = 30,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
+    logger = setup_logger(output_dir)
+
+    logger.info(f"Task: {task} | Dataset: {dataset_style} | Model: {model_name}")
+    logger.info(f"Dataset root: {dataset_root}")
 
     if dataset_style == "pitvis":
         frames_train, _, color_map, labels_train_raw = dm.load_frames_and_masks(
@@ -575,21 +602,21 @@ def main(
     if task == "phase_classification":
         print("\nTraining on diverse dataset...")
         _, hist_div, preds_div, gts_div, bal_div = train_phase_classifier(
-            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs
-        )
+            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, 
+            num_epochs, logger)
         print("\nTraining on random dataset...")
         _, hist_rand, preds_rand, gts_rand, bal_rand = train_phase_classifier(
-            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs
-        )
+            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, 
+            num_epochs, logger)
     elif task == "segmentation":
         print("\nTraining on diverse dataset...")
         _, hist_div, preds_div, gts_div, bal_div = train_segmentation_model(
-            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs, model_name,
-        )
+            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs, 
+            model_name, logger)
         print("\nTraining on random dataset...")
         _, hist_rand, preds_rand, gts_rand, bal_rand = train_segmentation_model(
-            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs, model_name,
-        )
+            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs, 
+            model_name, logger)
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 
@@ -604,7 +631,7 @@ def main(
     )
     plot_balanced_accuracy(bal_div, bal_rand, output_dir)
 
-    print(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
+   logger.info(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
 
 
 if __name__ == "__main__":
