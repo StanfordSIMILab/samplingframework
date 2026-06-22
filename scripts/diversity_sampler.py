@@ -436,7 +436,7 @@ class DiversitySampler:
         plt.close()
 
     # Evaluation Functions
-    def evaluate(self, data_arr, all_emb, cluster_labels, centroids, n=10, save_path="./diversity", save_plot=False) -> None:
+    def evaluate(self, data_arr, all_emb, cluster_labels, centroids, ssim_n=10, save_path="./diversity", save_plot=False) -> None:
         """ 
         
         Evaluate clustering and diversity metrics including: 
@@ -547,7 +547,7 @@ class DiversitySampler:
         for cid, centroid in zip(unique_labels, centroids):
             cluster_indices = np.where(cluster_labels == cid)[0]
             dists = np.linalg.norm(all_emb[cluster_indices] - centroid, axis=1)
-            take = min(n, len(cluster_indices))
+            take = min(ssim_n, len(cluster_indices))
             closest_n_idx = cluster_indices[np.argsort(dists)[:take]]
             frames = [
                 cv2.resize(data_arr[i], (256, 256), interpolation=cv2.INTER_AREA)
@@ -567,7 +567,7 @@ class DiversitySampler:
         plt.xticks(np.arange(len(cluster_ssim_avgs)), [str(l) for l in unique_labels])
         plt.xlabel("Cluster #")
         plt.ylabel("Avg Pairwise SSIM")
-        plt.title(f"Intra-cluster SSIM (n={n} frames per cluster, want high)")
+        plt.title(f"Intra-cluster SSIM (n={ssim_n} frames per cluster, want high)")
         plt.savefig(f"{save_path}/cluster_pairwise_ssim.png", bbox_inches='tight') if self.save_plots or save_plot else None
         plt.show()
         plt.close()
@@ -794,22 +794,21 @@ class DiversitySampler:
         print(f"\nCurrent clusters: {unique_labels}  (n={len(unique_labels)})")
 
         new_k = None
-        if self.keep_interactive:
-            while True:
-                raw = input(
-                    "Re-cluster with new k (enter integer, or Enter to keep current): "
-                ).strip()
-                if raw == "":
-                    break
-                try:
-                    new_k = int(raw)
-                    if new_k < 2:
-                        print("  k must be >= 2.")
-                        new_k = None
-                        continue
-                    break
-                except ValueError:
-                    print("  Enter an integer.")
+        while True:
+            raw = input(
+                "Re-cluster with new k (enter integer, or Enter to keep current): "
+            ).strip()
+            if raw == "":
+                break
+            try:
+                new_k = int(raw)
+                if new_k < 2:
+                    print("  k must be >= 2.")
+                    new_k = None
+                    continue
+                break
+            except ValueError:
+                print("  Enter an integer.")
 
         if new_k is not None:
             print(f"Re-clustering into k={new_k}...")
@@ -817,7 +816,6 @@ class DiversitySampler:
             cluster_labels = kmeans.fit_predict(all_emb)
             centroids = kmeans.cluster_centers_
             n_clusters = new_k
-
             closest_points = {}
             for cluster_id, centroid in enumerate(centroids):
                 distances = np.linalg.norm(all_emb - centroid, axis=1)
@@ -825,23 +823,22 @@ class DiversitySampler:
             unique_labels = list(range(new_k))
             print(f"  Done. New clusters: {unique_labels}")
 
-        if self.keep_interactive:
-            while True:
-                raw = input(
-                    "Clusters to remove (comma-separated IDs, or Enter to skip): "
-                ).strip()
-                if raw == "":
-                    clusters_to_remove = []
-                    break
-                try:
-                    clusters_to_remove = [int(x.strip()) for x in raw.split(",") if x.strip()]
-                    bad = [c for c in clusters_to_remove if c not in unique_labels]
-                    if bad:
-                        print(f"  Not found: {bad}. Valid: {unique_labels}")
-                        continue
-                    break
-                except ValueError:
-                    print("  Enter integers separated by commas.")
+        clusters_to_remove = []
+        while True:
+            raw = input(
+                "Clusters to remove (comma-separated IDs, or Enter to skip): "
+            ).strip()
+            if raw == "":
+                break
+            try:
+                clusters_to_remove = [int(x.strip()) for x in raw.split(",") if x.strip()]
+                bad = [c for c in clusters_to_remove if c not in unique_labels]
+                if bad:
+                    print(f"  Not found: {bad}. Valid: {unique_labels}")
+                    continue
+                break
+            except ValueError:
+                print("  Enter integers separated by commas.")
 
         if clusters_to_remove:
             for cid in clusters_to_remove:
@@ -903,19 +900,18 @@ class DiversitySampler:
     # Main function to create diverse training dataset from frames w/ optional mask.
     # Saves all_embeddings.npy and diverse_indices.npy to <data_dir>/diversity/
     def sample(self, 
-        data_arr, 
-        mask_arr=None, 
-        num_samples=None, 
-        percent_sample=0.1, 
-        emb_prev=None,
-        emb_model=None, 
-        method=None,
-        filter=None, 
-        run_eval=True, 
-        run_manual_filter=False, 
-        eval4_n=10,
-        save_data=False,
-        data_dir="."
+        data_arr, # numpy array of images
+        mask_arr=None, # optional: numpy array of corresponding masks
+        num_samples=None, # custom final number of samples desired
+        percent_sample=0.1, # alternative to num_samples, sample {percent_sample} from total
+        emb_prev=None, # optional: use one's own embeddings for diversity sampling
+        emb_model=None, # if you want to designate a specific embedding model
+        method=None, # If you want to designate a specific embedding model
+        filter=None, # Optional: Parameter to select pre-filtering method: "fvi"
+        run_eval=True, # Allow for running tightness/iso distances for clusters in data, optional interactive
+        ssim_n=10, # If evaluating SSIM clustering distance, how many points per cluster should be used
+        save_data=False, # Whether to save plots and metrics
+        data_dir="." # Where data is stored (and plots/metrics if indicated)
     ):
 
         # Check there is data available
@@ -1035,7 +1031,7 @@ class DiversitySampler:
                 "Must specify a valid clustering method. Choose 'hdbscan', 'dbscan', 'kmeans_elbow', 'kmeans_sil'."
             )
 
-        _last_closest_points = closest_points
+        last_closest_points = closest_points
 
         if run_eval:
             print("running dataset quality evaluation...")
@@ -1043,13 +1039,14 @@ class DiversitySampler:
                           centroids=centroids, include_outliers=True, save_path=out_path, save_plot=save_data)
             self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids, save_path=out_path, save_plot=save_data)
             self.evaluate(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
-                          centroids=centroids, n=eval4_n, save_path=out_path, save_plot=save_data)
+                          centroids=centroids, ssim_n=ssim_n, save_path=out_path, save_plot=save_data)
 
-            if run_manual_filter:
+            # Allow user to utilize evaluations to further filter clusters manually
+            if self.keep_interactive:
                 n_clusters, emb_for_clustering, cluster_labels, centroids, closest_points = self.filter_clusters_manually(emb_for_clustering, num_samples, cluster_labels, centroids, closest_points)
-                _last_closest_points = closest_points
+                last_closest_points = closest_points
 
-        filtered_frames, all_indices = self.filter_frames(data_arr, _last_closest_points)
+        filtered_frames, all_indices = self.filter_frames(data_arr, last_closest_points)
         filtered_masks = mask_arr[all_indices] if mask_arr is not None else None
 
         if filtered_indexes is not None:
