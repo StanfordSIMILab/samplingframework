@@ -1,5 +1,5 @@
-# data_manager.py: Functions for loading, parsing, and splitting datasets into train/val/test sets.
-# Also includes DatasetManager class which wraps these functions and provides additional utilities.
+# data_manager.py: Functions for loading and parsing datasets.
+
 import os
 import json
 import numpy as np

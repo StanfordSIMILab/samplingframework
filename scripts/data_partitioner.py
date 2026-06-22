@@ -1,4 +1,4 @@
-# data_partitioner.py - Utility for splitting dataset into train/val/test and saving as .npy files.
+# data_partitioner.py - Utility for splitting processed dataset into train/val/test and saving as .npy files.
 import os
 import json
 import numpy as np
