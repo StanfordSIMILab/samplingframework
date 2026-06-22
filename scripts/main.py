@@ -31,12 +31,12 @@ if __name__ == "__main__":
     Full data_folder structure after running script:
     data_folder/
     ├── [raw input data]
-    ├── sampling_pipeline_data.txt    # pipeline logger — all steps, timestamps
+    ├── sampling_pipeline_data.txt      # pipeline logger — all steps, timestamps
     ├── processed/
     │   ├── frames.npy
-    │   ├── masks.npy                 # if annotated
-    │   ├── labels.npy                # if pitvis
-    │   └── color_map.json            # if annotated
+    │   ├── masks.npy                   # if annotated
+    │   ├── labels.npy                  # if pitvis
+    │   └── color_map.json              # if annotated
     ├── split_data/
     │   ├── color_map.json
     │   ├── train/
@@ -46,27 +46,28 @@ if __name__ == "__main__":
     │   │   ├── diversity/
     │   │   │   ├── frames.npy
     │   │   │   ├── masks.npy
-    │   │   │   ├── frames/           # exported PNGs
-    │   │   │   ├── masks/            # exported PNGs
+    │   │   │   ├── frames/             # exported PNGs
+    │   │   │   ├── masks/              # exported PNGs
     │   │   │   ├── all_embeddings.npy
     │   │   │   ├── diverse_indices.npy
     │   │   │   └── diversity_metadata.json
     │   │   └── random/
     │   │       ├── frames.npy
     │   │       └── masks.npy
-    │   ├── val/                      # if val_prop > 0
+    │   ├── val/                        # if val_prop > 0
     │   │   ├── frames.npy
     │   │   └── masks.npy
     │   └── test/
     │       ├── frames.npy
     │       └── masks.npy
-    └── eval_outputs/                 # if div_eval=true
-        ├── evaluation_metrics.txt    # from eval logger
-        ├── training_curves.png
-        ├── confusion_matrices.png
-        ├── per_class_f1.png
-        ├── balanced_accuracy.png
-        └── diversity/                # clustering eval plots from sampler
+    └── eval_outputs/                   # if div_eval=true
+        ├── evaluation_metrics.txt      # from eval logger
+        ├── training_comparison/        # compare how well did the model learn
+        │   ├── training_curves.png
+        │   ├── confusion_matrices.png
+        │   ├── per_class_f1.png
+        │   └── balanced_accuracy.png
+        └── data_coverage/              # compare how good was the sampling
             ├── cluster_vis.png
             ├── cluster_iso_dist.png
             ├── cluster_tightness_graph.png

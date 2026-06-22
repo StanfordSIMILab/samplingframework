@@ -1050,16 +1050,21 @@ class DiversitySampler:
         last_closest_points = closest_points
 
         if run_eval:
-            print("running dataset quality evaluation...")
-            self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
-                          centroids=centroids, include_outliers=True, save_path=out_path, save_plot=save_data)
-            self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids, save_path=out_path, save_plot=save_data)
-            self.evaluate(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
-                          centroids=centroids, ssim_n=ssim_n, save_path=out_path, save_plot=save_data)
+            coverage_dir = os.path.join(out_path, "data_coverage") if out_path else None
+            if coverage_dir:
+                os.makedirs(coverage_dir, exist_ok=True)
 
-            # Allow user to utilize evaluations to further filter clusters manually
+            self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
+                          centroids=centroids, include_outliers=True, save_path=coverage_dir, save_plot=save_data)
+            self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids,
+                                save_path=coverage_dir, save_plot=save_data)
+            self.evaluate(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
+                          centroids=centroids, ssim_n=ssim_n, save_path=coverage_dir, save_plot=save_data)
+
             if self.keep_interactive:
-                n_clusters, emb_for_clustering, cluster_labels, centroids, closest_points = self.filter_clusters_manually(emb_for_clustering, num_samples, cluster_labels, centroids, closest_points)
+                n_clusters, emb_for_clustering, cluster_labels, centroids, closest_points = self.filter_clusters_manually(
+                    emb_for_clustering, num_samples, cluster_labels, centroids, closest_points
+                )
                 last_closest_points = closest_points
 
         filtered_frames, all_indices = self.filter_frames(data_arr, last_closest_points)
@@ -1088,7 +1093,7 @@ class DiversitySampler:
             np.save(os.path.join(out_path, "diverse_indices.npy"), np.array(all_indices))
 
             metadata = {
-                'original_num_frames': original_num_frames
+                'original_num_frames': original_num_frames,
                 "n_clusters": int(n_clusters),
                 "cluster_labels": [int(i) for i in cluster_labels],
                 "num_frames_selected": len(data_arr),

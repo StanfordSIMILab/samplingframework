@@ -518,7 +518,13 @@ def main(
     num_classes: int | None = None,
     num_epochs: int = 30,
 ) -> None:
-    os.makedirs(output_dir, exist_ok=True)
+    # Set-up output structure
+    training_dir = os.path.join(output_dir, "training_comparison")
+    coverage_dir = os.path.join(output_dir, "data_coverage")
+    os.makedirs(training_dir, exist_ok=True)
+    os.makedirs(coverage_dir, exist_ok=True)
+
+    # Initialize logger
     logger = setup_logger(output_dir)
 
     logger.info(f"Task: {task} | Dataset: {dataset_style} | Model: {model_name}")
@@ -613,7 +619,8 @@ def main(
         random_indices=random_indices,
         all_emb=normalize(all_emb),
         diverse_indices=diverse_indices,
-        save_dir=output_dir,
+        save_dir=coverage_dir,
+        save_plot=True,
     )
 
     print(f"\nx_div: {x_div.shape}  y_div: {y_div.shape}")
@@ -641,18 +648,18 @@ def main(
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 
-    plot_training_curves(hist_div, hist_rand, output_dir)
+    plot_training_curves(hist_div, hist_rand, training_dir)
     plot_confusion_matrices(
         preds_div, gts_div, preds_rand, gts_rand,
-        bal_div, bal_rand, num_classes, class_names, output_dir,
+        bal_div, bal_rand, num_classes, class_names, training_dir,
     )
     plot_per_class_f1(
         preds_div, gts_div, preds_rand, gts_rand,
-        bal_div, bal_rand, num_classes, class_names, output_dir,
+        bal_div, bal_rand, num_classes, class_names, training_dir,
     )
-    plot_balanced_accuracy(bal_div, bal_rand, output_dir)
+    plot_balanced_accuracy(bal_div, bal_rand, training_dir)
 
-   logger.info(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
+    logger.info(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
 
 
 if __name__ == "__main__":
