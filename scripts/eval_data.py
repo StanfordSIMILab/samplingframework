@@ -19,6 +19,7 @@ from sklearn.metrics import (
     f1_score,
 )
 from sklearn.preprocessing import normalize
+from kneed import KneeLocator
 
 import matplotlib.pyplot as plt
 from transformers import (
@@ -151,6 +152,14 @@ def build_model(num_classes: int, model_name: str | None = None):
         raise ValueError(f"Unknown model: {model_name!r}")
 
 # Training loop for hugging face vs. other
+def iterations_to_converge(losses: list) -> int | None:
+    if len(losses) < 3:
+        return None
+    x = list(range(len(losses)))
+    knee = KneeLocator(x, losses, curve="convex", direction="decreasing")
+    return knee.knee
+
+
 def train_loop(
     x_train: np.ndarray,
     train_labels: np.ndarray,
@@ -232,6 +241,12 @@ def train_loop(
     bal_acc = balanced_accuracy_score(gts, preds)
     log(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
     log(classification_report(gts, preds, target_names=class_names, zero_division=0))
+
+    convergence_epoch = iterations_to_converge(history["val_loss"])
+    if convergence_epoch is not None:
+        log(f"With sample size {len(x_train)}, it took {convergence_epoch + 1} iterations for loss to converge")
+    else:
+        log(f"With sample size {len(x_train)}, loss did not clearly converge within {num_epochs} epochs")
 
     return model, history, preds, gts, bal_acc
 
@@ -335,6 +350,12 @@ def train_loop_hf(
     bal_acc = balanced_accuracy_score(gts, preds)
     log(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
     log(classification_report(gts, preds, target_names=class_names, zero_division=0))
+
+    convergence_epoch = iterations_to_converge(history["val_loss"])
+    if convergence_epoch is not None:
+        log(f"With sample size {len(x_train)}, it took {convergence_epoch + 1} iterations for loss to converge")
+    else:
+        log(f"With sample size {len(x_train)}, loss did not clearly converge within {num_epochs} epochs")
 
     return model, history, preds, gts, bal_acc
 
