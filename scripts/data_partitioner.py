@@ -9,7 +9,7 @@ import re
 def train_val_test_split(
         data_folder: str | Path,
         test_size: float = 0.1,
-        val_size: float = 0.1,
+        val_size: float = 0.0, # Set val_size to non-zero to enable full (train/val/test split), default (train/test)
         shuffle: bool = True,
         seed: int = 42,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

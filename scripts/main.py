@@ -60,8 +60,8 @@ if __name__ == "__main__":
         help="Proportion of the dataset to use as the test set"
     )
     parser.add_argument(
-        "--val-prop", default=0.1, type=float,
-        help="Proportion of the dataset to use as the validation set (0 to skip)"
+        "--val-prop", default=0.0, type=float,
+        help="Proportion of the dataset to use as the validation set, defaults to 0 (skip)"
     )
 
     # Diversity Sampling parameters
