@@ -1,0 +1,27 @@
+# configuration.yaml
+
+# Data processing parameters
+data:
+  data_dir: "path/to/your/data"
+  annotated: false
+  mask_type: "color_mask"      # 'color_mask', 'mask', or 'watershed_mask'
+  dataset_style: "cholec"      # 'cholec', 'flat', 'nested', or 'pitvis'
+  num_classes: null            # null to infer from dataset
+
+# Data partitioning parameters
+partitioning:
+  skip_split: false
+  split_by_dir: false
+  train_prop: 0.1
+  test_prop: 0.1
+  val_prop: 0.0                # 0.0 to skip validation split
+
+# Diversity sampling parameters
+sampling:
+  keep_interactive: false
+
+# Evaluation parameters
+evaluation:
+  div_eval: false
+  task_evaluation: "segmentation"   # 'segmentation' or 'phase_classification'
+  model_name: null                  # 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'

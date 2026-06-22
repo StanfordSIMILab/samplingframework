@@ -9,4 +9,5 @@ opencv-python
 seaborn
 umap-learn
 pycocotools
+pyyaml
 kneed

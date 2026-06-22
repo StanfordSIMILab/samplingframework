@@ -4,6 +4,7 @@ import json
 import numpy as np
 from pathlib import Path
 import re
+from PIL import Image
 
 
 def train_val_test_split(
@@ -82,7 +83,58 @@ def split_by_directory(
     data_folder = Path(data_folder)
     split_data_dir = data_folder / "split_data"
     split_data_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir = data_folder / "processed"
 
+    if (processed_dir / "frames.npy").exists():
+        print(f"Loading from existing processed directory: {processed_dir}")
+        frames = np.load(processed_dir / "frames.npy")
+        masks = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
+        labels = np.load(processed_dir / "labels.npy", allow_pickle=True) if (processed_dir / "labels.npy").exists() else None
+
+        splits: dict[str, dict[str, np.ndarray]] = {}
+        for f in sorted(data_folder.rglob("*")):
+            if not f.is_file():
+                continue
+            if "processed" in f.parts or "split_data" in f.parts:
+                continue
+            if f.suffix.lower() not in {".jpg", ".jpeg", ".png", ".npy"}:
+                continue
+            split_name = infer_split_from_path(f.parts)
+            splits.setdefault(split_name, {})
+
+        if not splits:
+            raise FileNotFoundError(
+                f"No split-structured directories found under {data_folder} — "
+                "cannot infer train/val/test from directory names."
+            )
+
+        n = len(frames)
+        all_split_names = list(splits.keys())
+        n_per_split = n // len(all_split_names)
+
+        indices = np.arange(n)
+        offset = 0
+        for split_name in all_split_names:
+            split_dir = split_data_dir / split_name
+            split_dir.mkdir(parents=True, exist_ok=True)
+            idx = indices[offset : offset + n_per_split]
+            np.save(split_dir / "frames.npy", frames[idx])
+            if masks is not None:
+                np.save(split_dir / "masks.npy", masks[idx])
+            if labels is not None:
+                np.save(split_dir / "labels.npy", labels[idx])
+            offset += n_per_split
+
+        if (processed_dir / "color_map.json").exists():
+            import shutil
+            shutil.copy(processed_dir / "color_map.json", split_data_dir / "color_map.json")
+
+        print(f"Saved directory-inferred splits to {split_data_dir}")
+        for split_name in all_split_names:
+            print(f"  {split_name}: {n_per_split} frames")
+        return
+
+    # Fall back to reading from raw directory structure if no processed/ exists
     splits: dict[str, dict[str, list]] = {}
 
     for f in sorted(data_folder.rglob("*")):
@@ -90,18 +142,14 @@ def split_by_directory(
             continue
         if "processed" in f.parts or "split_data" in f.parts:
             continue
-        if f.suffix.lower() not in {".jpg", ".jpeg", ".png", ".npy"}:
+        if f.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
             continue
 
         split_name = infer_split_from_path(f.parts)
         if split_name not in splits:
             splits[split_name] = {"frames": [], "masks": []}
 
-        if f.suffix.lower() == ".npy":
-            continue
-
         is_mask = any(m in f.name.lower() for m in {"mask", "annotation"})
-
         img = Image.open(f).convert("RGB" if not is_mask else "L")
         if target_size is not None:
             h, w = target_size
@@ -117,7 +165,6 @@ def split_by_directory(
     for split_name, arrays in splits.items():
         split_dir = split_data_dir / split_name
         split_dir.mkdir(parents=True, exist_ok=True)
-
         if arrays["frames"]:
             np.save(split_dir / "frames.npy", np.stack(arrays["frames"]))
         if arrays["masks"]:

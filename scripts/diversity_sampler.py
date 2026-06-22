@@ -30,6 +30,18 @@ import umap
 
 from auxiliary.fvi_computation import fvi_filter, show_fvi_histogram
 
+# Helper function to create diversity sampling directory (in case of multiple attempts)
+def make_diversity_dir(base_path: str) -> str:
+    diversity_path = os.path.join(base_path, "diversity")
+    if not os.path.exists(diversity_path):
+        return diversity_path
+    i = 1
+    while True:
+        candidate = os.path.join(base_path, f"diversity_{i}")
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
 class DiversitySampler:
     def __init__(
         self,
@@ -356,27 +368,31 @@ class DiversitySampler:
         if save_plot:
             os.makedirs(save_path, exist_ok=True)
 
-        for sub_n, label in [(diverse_n, "diverse"), (random_n, "random")]:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        fig.suptitle("NN Coverage — Diverse vs Random", fontsize=13)
+
+        for row, (sub_n, label) in enumerate([(diverse_n, "diverse"), (random_n, "random")]):
             nn = NearestNeighbors(n_neighbors=1).fit(sub_n)
             dists = nn.kneighbors(full_n)[0].flatten()
             eps = np.percentile(dists, 50)
             eps_grid = np.linspace(0, np.percentile(dists, 95), 100)
 
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            fig.suptitle(f"NN coverage — {label}")
-            axes[0].hist(dists, bins=50, alpha=0.7)
-            axes[0].axvline(eps, linestyle="--")
-            axes[0].set_title(f"NN distance  |  Coverage={np.mean(dists < eps) * 100:.1f}%")
-            axes[0].set_xlabel("Distance")
-            axes[1].plot(eps_grid, [np.mean(dists < e) for e in eps_grid])
-            axes[1].axvline(eps, linestyle="--")
-            axes[1].set_title("Coverage vs ε")
-            axes[1].set_xlabel("ε")
-            axes[1].set_ylabel("Coverage")
-            plt.tight_layout()
-            plt.savefig(f"{save_path}/nn_coverage_{label}.png", dpi=150) if self.save_plots or save_plot else None
-            plt.show()
-            plt.close()
+            axes[row, 0].hist(dists, bins=50, alpha=0.7, color="steelblue" if label == "diverse" else "darkorange")
+            axes[row, 0].axvline(eps, linestyle="--", color="black")
+            axes[row, 0].set_title(f"[{label}] NN distance  |  Coverage={np.mean(dists < eps) * 100:.1f}%")
+            axes[row, 0].set_xlabel("Distance")
+            axes[row, 0].set_ylabel("Count")
+
+            axes[row, 1].plot(eps_grid, [np.mean(dists < e) for e in eps_grid], color="steelblue" if label == "diverse" else "darkorange")
+            axes[row, 1].axvline(eps, linestyle="--", color="black")
+            axes[row, 1].set_title(f"[{label}] Coverage vs ε")
+            axes[row, 1].set_xlabel("ε")
+            axes[row, 1].set_ylabel("Coverage")
+
+        plt.tight_layout()
+        plt.savefig(f"{save_path}/nn_coverage.png", dpi=150) if self.save_plots or save_plot else None
+        plt.show()
+        plt.close()
 
     def plot_pca_scatter(self, full_n: np.ndarray, diverse_n: np.ndarray, random_n: np.ndarray | None, save_path: str = "./data_quality", save_plot: bool = False) -> None:
         if save_plot:
@@ -923,8 +939,8 @@ class DiversitySampler:
 
         # Determine diversity output path if indicated
         if save_data:
-            out_path = os.path.join(data_dir, "diversity")
-            os.makedirs(out_path, exist_ok=True)
+            out_path = make_diversity_dir(data_dir)
+            os.makedirs(out_path)
         else:
             out_path = None
 
@@ -1072,7 +1088,7 @@ class DiversitySampler:
             np.save(os.path.join(out_path, "diverse_indices.npy"), np.array(all_indices))
 
             metadata = {
-                'original_num_frames' = original_num_frames
+                'original_num_frames': original_num_frames
                 "n_clusters": int(n_clusters),
                 "cluster_labels": [int(i) for i in cluster_labels],
                 "num_frames_selected": len(data_arr),
