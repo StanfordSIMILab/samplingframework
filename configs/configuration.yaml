@@ -1,10 +1,11 @@
 # configuration.yaml
 
-# Data set related parameters
+
+# Load Dataset Parameters:
 data:
   data_dir: "path/to/your/data"
   annotated: false
-  dataset_style: "cholec"         # 'cholec', 'flat', 'nested', or 'pitvis'
+  dataset_style: "cholec"         # 'cholec', 'pitvis', 'flat', or 'nested' *more info at bottom
 
 # If annotations present, allow user to choose task / set-up
 annotation:
@@ -34,3 +35,43 @@ evaluation:
   model_name: null               # if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
   num_epochs: 30
   batch_size: 1                  # use batch_size=1 for SGD-style convergence tracking
+
+# *Different Dataset Structures supported*
+# 'flat':
+# data_folder/
+# ├── frame_00001.jpg
+# ├── frame_00001_mask.png
+# ├── frame_00002.jpg
+# ├── frame_00002_mask.png
+# └── ...
+
+# 'nested'
+# data_folder/
+# ├── video_01/
+# │   ├── frame_00001.jpg
+# │   ├── frame_00001_mask.png
+# │   └── ...
+# ├── video_02/
+# │   ├── frame_00001.jpg
+# │   └── ...
+# └── ...
+
+# 'cholec'
+# data_folder/
+# ├── video_01/
+# │   ├── sample_001/
+# │   │   ├── frame_00001.jpg
+# │   │   └── frame_00001_mask.png
+# │   └── sample_002/
+# │       └── ...
+# └── ...
+
+# 'pitvis'
+# data_folder/
+# ├── 01/
+# │   ├── 00000.jpg
+# │   ├── 00125.jpg
+# │   └── ...
+# ├── 02/
+# │   └── ...
+# └── map_steps.csv
