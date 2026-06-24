@@ -7,7 +7,7 @@ data:
   annotated: false
   dataset_style: "cholec"         # 'cholec', 'pitvis', 'flat', or 'nested' *more info at bottom
 
-# If annotations present, allow user to choose task / set-up
+# If annotated is True, allow user to choose task / set-up
 annotation:
   task_evaluation: "segmentation" # 'segmentation' or 'phase_classification'
   mask_type: "color_mask"         # if segmentation: 'color_mask', 'mask', or 'watershed_mask'
