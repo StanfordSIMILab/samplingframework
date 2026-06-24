@@ -962,8 +962,9 @@ class DiversitySampler:
             print("Using previously computed embeddings...")
             all_emb = emb_prev
         else:
-            print("Computing embeddings...")
+            # Computing embeddings
             _emb_model = emb_model or self.emb_model
+            print("Computing embeddings using {emb_model}")
             if _emb_model == "dino":
                 all_emb = self.run_dino(data_arr)
             elif _emb_model == "openclip":
@@ -973,6 +974,7 @@ class DiversitySampler:
 
         filtered_indexes = None
         if use_filter is not None:
+            # Allow interactive for user to choose threshold, percentile, elbow method
             if self.keep_interactive:
                 if use_filter == "fvi":
                     while True:
@@ -985,6 +987,12 @@ class DiversitySampler:
 
                         if raw == "elbow":
                             filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
+                            if len(filtered_data_arr) <= num_samples:
+                                print(
+                                    f"FVI elbow kept only {len(filtered_data_arr)} frames (need {num_samples}) "
+                                    f"— please choose a different method or threshold."
+                                )
+                                continue
                             show_fvi_histogram(scores=scores, save_path=out_path)
                             data_arr = filtered_data_arr
                             if mask_arr is not None:
@@ -1002,6 +1010,13 @@ class DiversitySampler:
                                     filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
                                         data_arr=data_arr, percentile=percentile, use_elbow=False
                                     )
+                                    if len(filtered_data_arr) <= num_samples:
+                                        print(
+                                            f"Percentile={percentile} filtered too many frames "
+                                            f"({len(filtered_data_arr)} remain, need {num_samples}) "
+                                            f"— please enter a lower percentile."
+                                        )
+                                        continue
                                     show_fvi_histogram(scores=scores, save_path=out_path)
                                     data_arr = filtered_data_arr
                                     if mask_arr is not None:
@@ -1019,6 +1034,13 @@ class DiversitySampler:
                                     filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
                                         data_arr=data_arr, thresh=thresh, use_elbow=False
                                     )
+                                    if len(filtered_data_arr) <= num_samples:
+                                        print(
+                                            f"Threshold={thresh} filtered too many frames "
+                                            f"({len(filtered_data_arr)} remain, need {num_samples}) "
+                                            f"— please enter a lower threshold."
+                                        )
+                                        continue
                                     show_fvi_histogram(scores=scores, save_path=out_path)
                                     data_arr = filtered_data_arr
                                     if mask_arr is not None:
@@ -1032,29 +1054,49 @@ class DiversitySampler:
                             print("  Enter 'elbow', 'percentile', or 'custom'.")
 
                 else:
-                    raise ValueError(f"Unknown filter {use_filter}. Choose 'fvi'.")
+                    raise ValueError(f"Unknown filter {use_filter!r}. Choose 'fvi'.")
 
+            # Without interactive, default use elbow unless too many frames filtered than use conservative percentile
             else:
                 if use_filter == "fvi":
-                    # If not interactive, default to using elbow method unless filter_thresh provided
-                    if filter_thresh is not None:
-                        filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr=data_arr, thresh=filter_thresh, use_elbow=False)
-                        show_fvi_histogram(scores=scores, save_path=out_path)
-                        data_arr = filtered_data_arr
-                        if mask_arr is not None:
-                            mask_arr = mask_arr[filtered_indexes]
-                    else:
-                        filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
-                        show_fvi_histogram(scores=scores, save_path=out_path)
-                        data_arr = filtered_data_arr
-                        if mask_arr is not None:
-                            mask_arr = mask_arr[filtered_indexes]
+                    filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
+                        data_arr=data_arr, use_elbow=True
+                    )
+
+                    if len(filtered_data_arr) < num_samples:
+                        keep_pct = (num_samples / original_num_frames) * 100
+                        auto_percentile = int((100 - keep_pct) / 2)
+                        auto_percentile = max(0, min(auto_percentile, 95))
+                        print(
+                            f"FVI elbow kept only {len(filtered_data_arr)} frames (need {num_samples}) "
+                            f"— falling back to percentile={auto_percentile}"
+                        )
+                        filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
+                            data_arr=data_arr, percentile=auto_percentile, use_elbow=False
+                        )
+
+                    show_fvi_histogram(scores=scores, save_path=out_path)
+                    data_arr = filtered_data_arr
+                    if mask_arr is not None:
+                        mask_arr = mask_arr[filtered_indexes]
+
+                    print(f"FVI filtering complete: {len(data_arr)} / {original_num_frames} frames retained")
+
+                    if len(data_arr) < num_samples:
+                        raise ValueError(
+                            f"FVI filtering removed too many frames — only {len(data_arr)} remain "
+                            f"but {num_samples} are needed. Disable use_filter or reduce num_train_samples."
+                        )
+
+                else:
+                    raise ValueError(f"Unknown filter {use_filter!r}. Choose 'fvi'.")
 
         # Filter embeddings if specified
         emb_for_clustering = all_emb[filtered_indexes] if filtered_indexes is not None else all_emb
 
-        print("Performing clustering...")
+        #Perform clustering
         _method = method or self.method
+        print(f"Performing clustering using {_method}")
         if _method == "hdbscan":
             n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(emb_for_clustering, num_samples)
         elif _method == "dbscan":
