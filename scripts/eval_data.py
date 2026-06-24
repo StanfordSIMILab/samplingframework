@@ -170,6 +170,7 @@ def train_loop(
     class_names: list,
     model: nn.Module,
     num_epochs: int = 30,
+    batch_size: int = 1,
     logger: logging.Logger | None = None,
 ):
     log = logger.info if logger else print
@@ -179,13 +180,13 @@ def train_loop(
 
     train_dl = DataLoader(
         SurgicalDataset(x_train, train_labels),
-        batch_size=32,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=0,
     )
     val_dl = DataLoader(
         SurgicalDataset(x_val, val_labels),
-        batch_size=32,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=0,
     )
@@ -196,6 +197,7 @@ def train_loop(
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    train_step_loss = []
     all_preds, all_gts = [], []
 
     for epoch in range(num_epochs):
@@ -206,6 +208,7 @@ def train_loop(
             opt.zero_grad()
             out = model(imgs)
             loss = crit(out, lbls)
+            train_step_loss.appent(loss)
             loss.backward()
             opt.step()
             tl += loss.item() * len(imgs)
@@ -242,7 +245,7 @@ def train_loop(
     log(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
     log(classification_report(gts, preds, target_names=class_names, zero_division=0))
 
-    convergence_epoch = iterations_to_converge(history["val_loss"])
+    convergence_epoch = iterations_to_converge(train_step_loss)
     if convergence_epoch is not None:
         log(f"With sample size {len(x_train)}, it took {convergence_epoch + 1} iterations for loss to converge")
     else:
@@ -263,6 +266,7 @@ def train_loop_hf(
     processor,
     model_name: str,
     num_epochs: int = 30,
+    batch_size: int = 1,
     logger: logging.Logger | None = None,
 ):
     log = logger.info if logger else print
@@ -272,19 +276,20 @@ def train_loop_hf(
 
     train_dl = DataLoader(
         HFSegDataset(x_train, train_labels, processor),
-        batch_size=4,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=0,
     )
     val_dl = DataLoader(
         HFSegDataset(x_val, val_labels, processor),
-        batch_size=4,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=0,
     )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    train_step_loss = []
 
     for epoch in range(num_epochs):
         model.train()
@@ -294,6 +299,7 @@ def train_loop_hf(
             optimizer.zero_grad()
             outputs = model(**batch)
             loss = outputs.loss
+            train_step_loss.appent(loss)
             loss.backward()
             optimizer.step()
 
@@ -351,7 +357,7 @@ def train_loop_hf(
     log(f"\n[{label}] Balanced accuracy: {bal_acc:.4f}")
     log(classification_report(gts, preds, target_names=class_names, zero_division=0))
 
-    convergence_epoch = iterations_to_converge(history["val_loss"])
+    convergence_epoch = iterations_to_converge(train_step_loss)
     if convergence_epoch is not None:
         log(f"With sample size {len(x_train)}, it took {convergence_epoch + 1} iterations for loss to converge")
     else:
@@ -363,18 +369,18 @@ def train_loop_hf(
 # Training scripts for phase_classifier vs. segmentation
 def train_phase_classifier(
     x_train, train_labels, x_val, val_labels,
-    label, num_classes, class_names, num_epochs=30, logger: logging.Logger | None = None,
+    label, num_classes, class_names, num_epochs=30, batch_size = 1, logger: logging.Logger | None = None,
 ):
     model = LightCNN(num_classes)
     return train_loop(
         x_train, train_labels, x_val, val_labels,
-        label, num_classes, class_names, model, num_epochs, logger,
+        label, num_classes, class_names, model, num_epochs, batch_size, logger,
     )
 
 
 def train_segmentation_model(
     x_train, train_labels, x_val, val_labels,
-    label, num_classes, class_names, num_epochs=30, model_name: str | None = None,
+    label, num_classes, class_names, model_name: str | None = None, num_epochs=30, batch_size = 1,
     logger: logging.Logger | None = None,
 ):
     processor, model = build_model(num_classes, model_name=model_name)
@@ -395,12 +401,12 @@ def train_segmentation_model(
 
         return train_loop_hf(
             x_train, train_labels, x_val, val_labels,
-            label, num_classes, class_names, model, processor, model_name, num_epochs, logger,
+            label, num_classes, class_names, model, processor, model_name, num_epochs, batch_size, logger,
         )
 
     return train_loop(
         x_train, train_labels, x_val, val_labels,
-        label, num_classes, class_names, model, num_epochs, logger,
+        label, num_classes, class_names, model, num_epochs, batch_size, logger,
     )
 
 # Plot utilities
@@ -533,6 +539,7 @@ def main(
     model_name: str | None = None,
     num_classes: int | None = None,
     num_epochs: int = 30,
+    batch_size: int = 1,
     div_frames: np.ndarray | None = None,   # If diversity sampling already performed
     div_masks: np.ndarray | None = None,    # If diversity sampling already performed
     div_indices: np.ndarray | None = None,  # If diversity sampling already performed
@@ -668,20 +675,20 @@ def main(
         print("\nTraining on diverse dataset...")
         _, hist_div, preds_div, gts_div, bal_div = train_phase_classifier(
             x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, 
-            num_epochs, logger)
+            num_epochs, batch_size, logger)
         print("\nTraining on random dataset...")
         _, hist_rand, preds_rand, gts_rand, bal_rand = train_phase_classifier(
             x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, 
-            num_epochs, logger)
+            num_epochs, batch_size, logger)
     elif task == "segmentation":
         print("\nTraining on diverse dataset...")
         _, hist_div, preds_div, gts_div, bal_div = train_segmentation_model(
-            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, num_epochs, 
-            model_name, logger)
+            x_div, y_div, frames_val, labels_val, "diverse", num_classes, class_names, model_name, 
+            num_epochs, batch_size, logger)
         print("\nTraining on random dataset...")
         _, hist_rand, preds_rand, gts_rand, bal_rand = train_segmentation_model(
-            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, num_epochs, 
-            model_name, logger)
+            x_rand, y_rand, frames_val, labels_val, "random", num_classes, class_names, model_name,
+            num_epochs, batch_size, logger)
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 

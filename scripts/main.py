@@ -129,6 +129,7 @@ if __name__ == "__main__":
     task_evaluation  = cfg["evaluation"]["task_evaluation"]
     model_name       = cfg["evaluation"]["model_name"]
     num_epochs       = cfg["evaluation"]["num_epochs"]
+    batch_size       = cfg["evaluation"]["batch_size"]
 
     # Configure logger:
     log_path = data_folder / "sampling_pipeline_log.txt"
@@ -296,7 +297,8 @@ if __name__ == "__main__":
             output_dir=str(data_folder / "eval_outputs"),
             model_name=model_name,
             num_classes=num_classes,
-            num_epochs=num_epochs
+            num_epochs=num_epochs,
+            batch_size=batch_size,
             div_frames=div_frames,
             div_masks=div_masks,
             div_indices=np.array(div_indices),

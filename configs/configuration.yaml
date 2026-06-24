@@ -30,3 +30,4 @@ evaluation:
   task_evaluation: "segmentation"   # 'segmentation' or 'phase_classification'
   model_name: null                  # 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
   num_epochs: 30
+  batch_size: 1                     # For comparing the num of iterations to convergence, use SGD (batch_size 1)
