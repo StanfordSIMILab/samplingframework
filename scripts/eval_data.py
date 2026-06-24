@@ -30,7 +30,7 @@ from transformers import (
     UperNetForSemanticSegmentation,
 )
 
-from auxiliary import data_manager as dm
+import data_manager as dm
 from diversity_sampler import DiversitySampler
 
 
@@ -208,7 +208,7 @@ def train_loop(
             opt.zero_grad()
             out = model(imgs)
             loss = crit(out, lbls)
-            train_step_loss.appent(loss)
+            train_step_loss.append(loss)
             loss.backward()
             opt.step()
             tl += loss.item() * len(imgs)
@@ -299,7 +299,7 @@ def train_loop_hf(
             optimizer.zero_grad()
             outputs = model(**batch)
             loss = outputs.loss
-            train_step_loss.appent(loss)
+            train_step_loss.append(loss)
             loss.backward()
             optimizer.step()
 
@@ -410,7 +410,7 @@ def train_segmentation_model(
     )
 
 # Plot utilities
-def plot_training_curves(model_name: str | None = None, hist_div: dict, hist_rand: dict, output_dir: str) -> None:
+def plot_training_curves(hist_div: dict, hist_rand: dict, output_dir: str, model_name: str | None = None,s) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -433,7 +433,6 @@ def plot_training_curves(model_name: str | None = None, hist_div: dict, hist_ran
 
 
 def plot_confusion_matrices(
-    model_name: str | None = None,
     preds_div: np.ndarray,
     gts_div: np.ndarray,
     preds_rand: np.ndarray,
@@ -443,6 +442,7 @@ def plot_confusion_matrices(
     num_classes: int,
     class_names: list,
     output_dir: str,
+    model_name: str | None = None,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -471,7 +471,6 @@ def plot_confusion_matrices(
 
 
 def plot_per_class_f1(
-    model_name: str | None = None,
     preds_div: np.ndarray,
     gts_div: np.ndarray,
     preds_rand: np.ndarray,
@@ -481,6 +480,7 @@ def plot_per_class_f1(
     num_classes: int,
     class_names: list,
     output_dir: str,
+    model_name: str | None = None,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -494,7 +494,7 @@ def plot_per_class_f1(
     ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("F1 score")
     ax.set_ylim(0, 1)
-    if model_name is not None
+    if model_name is not None:
         ax.set_title(f"{model_name} Per-class F1 — diverse vs random")
     else:
         ax.set_title("Per-class F1 — diverse vs random")
@@ -505,10 +505,10 @@ def plot_per_class_f1(
 
 
 def plot_balanced_accuracy(
-    model_name: str | None = None,
     bal_div: float, 
     bal_rand: float, 
-    output_dir: str
+    output_dir: str,
+    model_name: str | None = None,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
@@ -692,16 +692,10 @@ def main(
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 
-    plot_training_curves(model_name, hist_div, hist_rand, training_dir)
-    plot_confusion_matrices(
-        model_name, preds_div, gts_div, preds_rand, gts_rand,
-        bal_div, bal_rand, num_classes, class_names, training_dir,
-    )
-    plot_per_class_f1(
-        model_name, preds_div, gts_div, preds_rand, gts_rand,
-        bal_div, bal_rand, num_classes, class_names, training_dir,
-    )
-    plot_balanced_accuracy(model_name, bal_div, bal_rand, training_dir)
+    plot_training_curves(hist_div, hist_rand, training_dir, model_name=model_name)
+    plot_confusion_matrices(preds_div, gts_div, preds_rand, gts_rand, bal_div, bal_rand, num_classes, class_names, training_dir, model_name=model_name)
+    plot_per_class_f1(preds_div, gts_div, preds_rand, gts_rand, bal_div, bal_rand, num_classes, class_names, training_dir, model_name=model_name)
+    plot_balanced_accuracy(bal_div, bal_rand, training_dir, model_name=model_name)
 
     logger.info(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
 

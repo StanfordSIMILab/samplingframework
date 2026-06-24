@@ -17,8 +17,8 @@ def train_val_test_split(
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     data_folder = Path(data_folder)
-    frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
     processed_dir = data_folder / "processed"
+    frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
 
     if not processed_dir.exists():
         raise FileNotFoundError(
@@ -66,8 +66,8 @@ def train_val_test_split(
             np.save(split_dir / "labels.npy", labels[idx])
         if frame_metadata is not None:
             np.save(split_dir / "frame_metadata.npy", frame_metadata[idx])
-            with open(processed_dir / "frame_metadata.json", "w") as f:
-                json.dump({str(i): str(m) for i, m in enumerate(frame_metadata)}, f, indent=2)
+            with open(split_dir / "frame_metadata.json", "w") as f:
+                json.dump({str(int(i)): str(frame_metadata[i]) for i in idx}, f, indent=2)
 
     if (processed_dir / "color_map.json").exists():
         shutil.copy(processed_dir / "color_map.json", split_data_dir / "color_map.json")
@@ -84,10 +84,10 @@ def split_by_directory(
     ) -> None:
 
     data_folder = Path(data_folder)
-    frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
     split_data_dir = data_folder / "split_data"
     split_data_dir.mkdir(parents=True, exist_ok=True)
     processed_dir = data_folder / "processed"
+    frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
 
     if (processed_dir / "frames.npy").exists():
         print(f"Loading from existing processed directory: {processed_dir}")

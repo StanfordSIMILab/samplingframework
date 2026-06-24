@@ -1,33 +1,36 @@
 # configuration.yaml
 
-# Data processing parameters
+# Data set related parameters
 data:
   data_dir: "path/to/your/data"
   annotated: false
-  mask_type: "color_mask"      # 'color_mask', 'mask', or 'watershed_mask'
-  dataset_style: "cholec"      # 'cholec', 'flat', 'nested', or 'pitvis'
-  num_classes: null            # null to infer from dataset
+  dataset_style: "cholec"         # 'cholec', 'flat', 'nested', or 'pitvis'
 
-# Data partitioning parameters
+# If annotations present, allow user to choose task / set-up
+annotation:
+  task_evaluation: "segmentation" # 'segmentation' or 'phase_classification'
+  mask_type: "color_mask"         # if segmentation: 'color_mask', 'mask', or 'watershed_mask'
+  num_classes: null               # null to infer from dataset
+  labels_path: null               # optional: path to CSV for non-pitvis phase classification
+
+# Allow users to split data
 partitioning:
-  skip_split: false            # Optional, allow for partioning of data into train/test or train/val/test
-  split_by_dir: false          # Use key words in file names like val, test, train to partion data
+  skip_split: false
+  split_by_dir: false
   test_prop: 0.1
-  val_prop: 0.0                # 0.0 to skip validation split
+  val_prop: 0.0                  # 0.0 to skip validation split
 
-# Diversity sampling parameters
+# Specific parameters for diversity sampling
 sampling:
-  # Use either num_train_samples or train_prop, not both. Default is to num_train_samples if both indicated
-  num_train_samples: null      # total number of training samples to use to create diversity/randomly sampled dataset
-  train_prop: 0.1              # percent of total training frames to use to create diversity/randomly sampled dataset
-  keep_interactive: false      # optional: allow user to interactively reduce number of clusters/manage filter
-  filter: 'fvi'                # optional pre-filtering: 'fvi', if keep_interactive=false, default elbow method
-  filter_thresh: null          # optional user threshold if keep_interactive=false, default elbow method
+  num_train_samples: null        # total number of samples (takes priority over train_prop if both set)
+  train_prop: 0.1                # proportion of train frames to select
+  keep_interactive: false
+  use_filter: null               # optional: 'fvi'
+  filter_thresh: null            # optional: custom threshold, default uses elbow method
 
-# Evaluation parameters
+# Specific parameters for evaluating diversity / random on training model
 evaluation:
   div_eval: false
-  task_evaluation: "segmentation"   # 'segmentation' or 'phase_classification'
-  model_name: null                  # 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
+  model_name: null               # if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
   num_epochs: 30
-  batch_size: 1                     # For comparing the num of iterations to convergence, use SGD (batch_size 1)
+  batch_size: 1                  # use batch_size=1 for SGD-style convergence tracking

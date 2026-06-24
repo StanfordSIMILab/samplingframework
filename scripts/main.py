@@ -15,9 +15,11 @@ import logging
 from pathlib import Path
 
 import numpy as np
+import json
+import pandas as pd
 
 from diversity_sampler import DiversitySampler
-from auxiliary.data_manager import load_frames_and_masks, load_frames_from_dir
+import data_manager as dm
 from auxiliary.data_partitioner import train_val_test_split, split_by_directory
 import eval_data as eval
 
@@ -110,23 +112,25 @@ if __name__ == "__main__":
     processed_dir  = data_folder / "processed"
     split_data_dir = data_folder / "split_data"
     annotated      = cfg["data"]["annotated"]
-    mask_type      = cfg["data"]["mask_type"]
     dataset_style  = cfg["data"]["dataset_style"]
-    num_classes    = cfg["data"]["num_classes"]
+
+    mask_type      = cfg["annotation"]["mask_type"]
+    num_classes    = cfg["annotation"]["num_classes"]
+    task_evaluation = cfg["annotation"]["task_evaluation"]
+    labels_path    = cfg["annotation"].get("labels_path", None)
 
     skip_split     = cfg["partitioning"]["skip_split"]
     split_by_dir   = cfg["partitioning"]["split_by_dir"]
     test_prop      = cfg["partitioning"]["test_prop"]
     val_prop       = cfg["partitioning"]["val_prop"]
 
-    num_train_samples = = cfg["sampling"]["num_train_samples"]
+    num_train_samples = cfg["sampling"]["num_train_samples"]
     train_prop     = cfg["sampling"]["train_prop"]
     keep_interactive = cfg["sampling"]["keep_interactive"]
     use_filter = cfg["sampling"]["use_filter"]
     filter_thresh = cfg["sampling"]["filter_thresh"]
 
     div_eval         = cfg["evaluation"]["div_eval"]
-    task_evaluation  = cfg["evaluation"]["task_evaluation"]
     model_name       = cfg["evaluation"]["model_name"]
     num_epochs       = cfg["evaluation"]["num_epochs"]
     batch_size       = cfg["evaluation"]["batch_size"]
@@ -154,9 +158,7 @@ if __name__ == "__main__":
     sampler = DiversitySampler(
         emb_model="openclip",
         method="kmeans_elbow",
-        keep_interactive = keep_interactive
-        use_filter = use_filter
-        filter_thresh = filter_thresh
+        keep_interactive = keep_interactive,
     )
 
     # Load and process data
@@ -166,29 +168,55 @@ if __name__ == "__main__":
         frames = np.load(processed_dir / "frames.npy")
         masks  = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
         labels = np.load(processed_dir / "labels.npy", allow_pickle=True) if (processed_dir / "labels.npy").exists() else None
+        frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
     elif processed_dir.exists():
         logger.info("Found existing processed/ — skipping data loading...")
         frames = np.load(processed_dir / "frames.npy")
         masks  = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
         labels = np.load(processed_dir / "labels.npy", allow_pickle=True) if (processed_dir / "labels.npy").exists() else None
+        frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
     else:
-        if annotated:
-            logger.info("Loading annotated dataset...")
-            result = load_frames_and_masks(
-                data_folder=data_folder,
-                mask_type=mask_type,
-                dataset_style=dataset_style,
-            )
-            if len(result) == 4:
-                frames, masks, color_map, labels = result
+        if task_evaluation == "phase_classification":
+            logger.info("Loading frames only for phase classification...")
+            if annotated:
+                if dataset_style == "pitvis":
+                    frames, masks, color_map, labels, frame_metadata = dm.load_frames_and_masks(
+                        data_folder=data_folder,
+                        dataset_style="pitvis",
+                    )
+                    # labels contains phase annotations from pitvis_extractor
+                else:
+                    raise ValueError(
+                        "Phase classification requires temporal labels — only 'pitvis' dataset style "
+                        "is currently supported for phase classification. For other datasets, provide "
+                        "a CSV with per-frame phase labels."
+                    )
             else:
-                frames, masks, color_map = result
+                frames, frame_metadata = dm.load_frames_from_dir(data_folder=data_folder)
                 labels = None
+                masks = None
+            
         else:
-            logger.info("Loading unannotated dataset...")
-            frames = load_frames_from_dir(data_folder=data_folder)
-            masks  = None
-            labels = None
+            logger.info("Loading frames and masks for segmentation...")
+            if annotated:
+                result = dm.load_frames_and_masks(
+                    data_folder=data_folder,
+                    mask_type=mask_type,
+                    dataset_style=dataset_style,
+                )
+                if len(result) == 5:
+                    frames, masks, color_map, labels, frame_metadata = result
+                else:
+                    frames, masks, color_map, frame_metadata = result
+                    labels = None
+            else:
+                frames, frame_metadata = dm.load_frames_from_dir(data_folder=data_folder)
+                masks = None
+                labels = None
+
+    if labels_path is not None and labels is None:
+        labels_df = pd.read_csv(labels_path)
+        labels = labels_df["phase"].values.astype(np.int64)
 
     len_total_frames = len(frames)
     logger.info(f"Loaded {len_total_frames} frames")
@@ -231,11 +259,13 @@ if __name__ == "__main__":
     # Diversity Sampling
     logger.info(f"Running diversity sampling — target n={num_train_samples}...")
     diversity_out = split_data_dir / "train"
-    _, div_frames, div_masks, div_indices = sampler.sample(
+    _, div_frames, div_masks, div_indices, div_out_path = sampler.sample(
         data_arr=train_frames,
         mask_arr=train_masks,
         num_samples=num_train_samples,
         run_eval=div_eval,
+        use_filter=use_filter,
+        filter_thresh=filter_thresh,
         save_data=True,
         data_dir=str(diversity_out),
         frame_metadata=train_frame_metadata,
@@ -298,14 +328,14 @@ if __name__ == "__main__":
             model_name=model_name,
             num_classes=num_classes,
             num_epochs=num_epochs,
-            batch_size=batch_size,
+            batch_size = batch_size,
             div_frames=div_frames,
             div_masks=div_masks,
             div_indices=np.array(div_indices),
             rand_frames=train_frames[random_indices],
             rand_masks=train_masks[random_indices] if train_masks is not None else None,
             rand_indices=random_indices,
-            all_emb=np.load(str(diversity_out / "diversity" / "all_embeddings.npy")),
+            all_emb=np.load(os.path.join(div_out_path, "all_embeddings.npy")),
         )
 
     logger.info("Done!")

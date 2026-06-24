@@ -941,8 +941,14 @@ class DiversitySampler:
 
         # Determine diversity output path if indicated
         if save_data:
+            # Create main ./diversity/ folder
             out_path = make_diversity_dir(data_dir)
             os.makedirs(out_path)
+            
+            # Create save path for cluster evaluations in diversity folder:
+            coverage_dir = os.path.join(out_path, "cluster_eval") if out_path else None
+            if coverage_dir:
+                os.makedirs(coverage_dir, exist_ok=True)
         else:
             out_path = None
 
@@ -1026,10 +1032,10 @@ class DiversitySampler:
                             print("  Enter 'elbow', 'percentile', or 'custom'.")
 
                 else:
-                    raise ValueError(f"Unknown filter {filter!r}. Choose 'fvi'.")
+                    raise ValueError(f"Unknown filter {use_filter}. Choose 'fvi'.")
 
             else:
-                if use_filter == "fvi"
+                if use_filter == "fvi":
                     # If not interactive, default to using elbow method unless filter_thresh provided
                     if filter_thresh is not None:
                         filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr=data_arr, thresh=filter_thresh, use_elbow=False)
@@ -1069,10 +1075,6 @@ class DiversitySampler:
         last_closest_points = closest_points
 
         if run_eval:
-            coverage_dir = os.path.join(out_path, "cluster_eval") if out_path else None
-            if coverage_dir:
-                os.makedirs(coverage_dir, exist_ok=True)
-
             self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
                           centroids=centroids, include_outliers=True, save_path=coverage_dir, save_plot=save_data)
             self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids,
@@ -1121,11 +1123,9 @@ class DiversitySampler:
             with open(os.path.join(out_path, "diversity_metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=2)
 
-            index_map = {int(i): str(frame_metadata[i]) for i in all_indices}
-
-            frame_metadata is not None:
+            if frame_metadata is not None:
                 index_map = {int(i): str(frame_metadata[i]) for i in all_indices}
                 with open(os.path.join(out_path, "index_to_frame.json"), "w") as f:
                     json.dump(index_map, f, indent=2)
 
-        return num_samples, filtered_frames, filtered_masks, all_indices
+        return num_samples, filtered_frames, filtered_masks, all_indices, out_path
