@@ -916,65 +916,72 @@ class DiversitySampler:
     # Main function to create diverse training dataset from frames w/ optional mask.
     # Saves all_embeddings.npy and diverse_indices.npy to <data_dir>/diversity/
     def sample(self, 
-        data_arr=None, # numpy array of images
-        mask_arr=None, # optional: numpy array of corresponding masks
-        frame_metadata=None, # Metadata produces by data manager/partioner to map indices selected to frame names
-        num_samples=None, # custom final number of samples desired
-        percent_sample=0.5, # alternative to num_samples, sample {percent_sample} from total
-        emb_prev=None, # optional: use one's own embeddings for diversity sampling
-        emb_model=None, # if you want to designate a specific embedding model
-        method=None, # If you want to designate a specific embedding model
-        use_filter=None, # Optional: Parameter to select pre-filtering method: "fvi"
-        filter_thresh = None, # If using filter, optional provide filter thresh 
-        run_eval=True, # Allow for running tightness/iso distances for clusters in data, optional interactive
-        ssim_n=10, # If evaluating SSIM clustering distance, how many points per cluster should be used
-        save_data=False, # Whether to save plots and metrics
-        data_dir="." # Where data is stored (and plots/metrics if indicated)
+        data_arr=None,
+        mask_arr=None,
+        frame_metadata=None,
+        num_samples=None,
+        percent_sample=0.5,
+        emb_prev=None,
+        emb_model=None,
+        method=None,
+        use_filter=None,
+        filter_thresh=None,
+        run_eval=True,
+        ssim_n=10,
+        save_data=False,
+        data_dir="."
     ):
-
-        # Check there is data available
         if data_arr is None or len(data_arr) == 0:
             raise ValueError(
                 "Error in training data creation, please make sure to input a correct numpy data array"
             )
         original_num_frames = len(data_arr)
 
-        # Determine diversity output path if indicated
         if save_data:
-            # Create main ./diversity/ folder
             out_path = make_diversity_dir(data_dir)
             os.makedirs(out_path)
-            
-            # Create save path for cluster evaluations in diversity folder:
-            coverage_dir = os.path.join(out_path, "cluster_eval") if out_path else None
-            if coverage_dir:
-                os.makedirs(coverage_dir, exist_ok=True)
+            coverage_dir = os.path.join(out_path, "cluster_eval")
+            os.makedirs(coverage_dir, exist_ok=True)
+
+            sample_logger = logging.getLogger(f"diversity_sampling_{out_path}")
+            sample_logger.setLevel(logging.INFO)
+            sample_logger.handlers.clear()
+            fh = logging.FileHandler(os.path.join(out_path, "diversity_sampling.txt"), mode="w")
+            fh.setLevel(logging.INFO)
+            ch = logging.StreamHandler()
+            ch.setLevel(logging.INFO)
+            formatter = logging.Formatter("%(message)s")
+            fh.setFormatter(formatter)
+            ch.setFormatter(formatter)
+            sample_logger.addHandler(fh)
+            sample_logger.addHandler(ch)
         else:
             out_path = None
+            coverage_dir = None
+            sample_logger = None
 
-        # Determine number of samples in final diversity sampled dataset
+        log = sample_logger.info if sample_logger else print
+
         if num_samples is None:
-            # Sample 50% of frames by default unless user specifies otherwise
             num_samples = int(len(data_arr) * percent_sample)
+        log(f"Target samples: {num_samples} / {original_num_frames} total frames")
 
-        # Determine embeddings for entire data array
         if emb_prev is not None:
-            print("Using previously computed embeddings...")
+            log("Using previously computed embeddings...")
             all_emb = emb_prev
         else:
-            # Computing embeddings
             _emb_model = emb_model or self.emb_model
-            print("Computing embeddings using {emb_model}")
+            log(f"Computing embeddings using {_emb_model}...")
             if _emb_model == "dino":
                 all_emb = self.run_dino(data_arr)
             elif _emb_model == "openclip":
                 all_emb = self.run_openclip(data_arr)
             else:
                 raise ValueError("Must specify a valid embedding model. Choose 'dino' or 'openclip'.")
+        log(f"Embeddings computed: shape={all_emb.shape}")
 
         filtered_indexes = None
         if use_filter is not None:
-            # Allow interactive for user to choose threshold, percentile, elbow method
             if self.keep_interactive:
                 if use_filter == "fvi":
                     while True:
@@ -988,7 +995,7 @@ class DiversitySampler:
                         if raw == "elbow":
                             filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
                             if len(filtered_data_arr) <= num_samples:
-                                print(
+                                log(
                                     f"FVI elbow kept only {len(filtered_data_arr)} frames (need {num_samples}) "
                                     f"— please choose a different method or threshold."
                                 )
@@ -997,6 +1004,7 @@ class DiversitySampler:
                             data_arr = filtered_data_arr
                             if mask_arr is not None:
                                 mask_arr = mask_arr[filtered_indexes]
+                            log(f"FVI elbow filtering complete: {len(data_arr)} / {original_num_frames} frames retained")
                             break
 
                         elif raw == "percentile":
@@ -1005,13 +1013,13 @@ class DiversitySampler:
                                 try:
                                     percentile = int(raw2)
                                     if not 0 <= percentile <= 100:
-                                        print("  Enter an integer between 0 and 100.")
+                                        log("  Enter an integer between 0 and 100.")
                                         continue
                                     filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
                                         data_arr=data_arr, percentile=percentile, use_elbow=False
                                     )
                                     if len(filtered_data_arr) <= num_samples:
-                                        print(
+                                        log(
                                             f"Percentile={percentile} filtered too many frames "
                                             f"({len(filtered_data_arr)} remain, need {num_samples}) "
                                             f"— please enter a lower percentile."
@@ -1021,9 +1029,10 @@ class DiversitySampler:
                                     data_arr = filtered_data_arr
                                     if mask_arr is not None:
                                         mask_arr = mask_arr[filtered_indexes]
+                                    log(f"FVI percentile={percentile} filtering complete: {len(data_arr)} / {original_num_frames} frames retained")
                                     break
                                 except ValueError:
-                                    print("  Enter a valid integer.")
+                                    log("  Enter a valid integer.")
                             break
 
                         elif raw == "custom":
@@ -1035,7 +1044,7 @@ class DiversitySampler:
                                         data_arr=data_arr, thresh=thresh, use_elbow=False
                                     )
                                     if len(filtered_data_arr) <= num_samples:
-                                        print(
+                                        log(
                                             f"Threshold={thresh} filtered too many frames "
                                             f"({len(filtered_data_arr)} remain, need {num_samples}) "
                                             f"— please enter a lower threshold."
@@ -1045,18 +1054,18 @@ class DiversitySampler:
                                     data_arr = filtered_data_arr
                                     if mask_arr is not None:
                                         mask_arr = mask_arr[filtered_indexes]
+                                    log(f"FVI custom threshold={thresh} filtering complete: {len(data_arr)} / {original_num_frames} frames retained")
                                     break
                                 except ValueError:
-                                    print("  Enter a valid float.")
+                                    log("  Enter a valid float.")
                             break
 
                         else:
-                            print("  Enter 'elbow', 'percentile', or 'custom'.")
+                            log("  Enter 'elbow', 'percentile', or 'custom'.")
 
                 else:
                     raise ValueError(f"Unknown filter {use_filter!r}. Choose 'fvi'.")
 
-            # Without interactive, default use elbow unless too many frames filtered than use conservative percentile
             else:
                 if use_filter == "fvi":
                     filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
@@ -1067,7 +1076,7 @@ class DiversitySampler:
                         keep_pct = (num_samples / original_num_frames) * 100
                         auto_percentile = int((100 - keep_pct) / 2)
                         auto_percentile = max(0, min(auto_percentile, 95))
-                        print(
+                        log(
                             f"FVI elbow kept only {len(filtered_data_arr)} frames (need {num_samples}) "
                             f"— falling back to percentile={auto_percentile}"
                         )
@@ -1080,7 +1089,7 @@ class DiversitySampler:
                     if mask_arr is not None:
                         mask_arr = mask_arr[filtered_indexes]
 
-                    print(f"FVI filtering complete: {len(data_arr)} / {original_num_frames} frames retained")
+                    log(f"FVI filtering complete: {len(data_arr)} / {original_num_frames} frames retained")
 
                     if len(data_arr) < num_samples:
                         raise ValueError(
@@ -1091,32 +1100,38 @@ class DiversitySampler:
                 else:
                     raise ValueError(f"Unknown filter {use_filter!r}. Choose 'fvi'.")
 
-        # Filter embeddings if specified
         emb_for_clustering = all_emb[filtered_indexes] if filtered_indexes is not None else all_emb
 
-        #Perform clustering
         _method = method or self.method
-        print(f"Performing clustering using {_method}")
+        log(f"Performing clustering using {_method}...")
         if _method == "hdbscan":
-            n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(emb_for_clustering, num_samples)
+            n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(
+                emb_for_clustering, num_samples, save_path=coverage_dir or out_path or "./diversity"
+            )
         elif _method == "dbscan":
-            n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(emb_for_clustering, num_samples)
+            n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(
+                emb_for_clustering, num_samples
+            )
         elif _method == "kmeans_elbow":
-            n_clusters, cluster_labels, centroids, closest_points,  emb_for_clustering = self.run_knn(
-                all_emb=emb_for_clustering, num_train=num_samples, method="elbow"
+            n_clusters, cluster_labels, centroids, closest_points, emb_for_clustering = self.run_knn(
+                all_emb=emb_for_clustering, num_train=num_samples, method="elbow",
+                save_path=coverage_dir or out_path or "./diversity"
             )
         elif _method == "kmeans_sil":
             n_clusters, cluster_labels, centroids, closest_points, emb_for_clustering = self.run_knn(
-                all_emb=emb_for_clustering, num_train=num_samples, method="silhouette"
+                all_emb=emb_for_clustering, num_train=num_samples, method="silhouette",
+                save_path=coverage_dir or out_path or "./diversity"
             )
         else:
             raise ValueError(
                 "Must specify a valid clustering method. Choose 'hdbscan', 'dbscan', 'kmeans_elbow', 'kmeans_sil'."
             )
+        log(f"Clustering complete: {n_clusters} clusters found")
 
         last_closest_points = closest_points
 
         if run_eval:
+            log("Running dataset quality evaluation...")
             self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
                           centroids=centroids, include_outliers=True, save_path=coverage_dir, save_plot=save_data)
             self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids,
@@ -1129,26 +1144,27 @@ class DiversitySampler:
                     emb_for_clustering, num_samples, cluster_labels, centroids, closest_points
                 )
                 last_closest_points = closest_points
+                log(f"After manual filtering: {n_clusters} clusters remaining")
 
         filtered_frames, all_indices = self.filter_frames(data_arr, last_closest_points)
         filtered_masks = mask_arr[all_indices] if mask_arr is not None else None
+        log(f"Selected {len(all_indices)} frames from {len(data_arr)} filtered frames")
 
         if filtered_indexes is not None:
             all_indices = filtered_indexes[all_indices]
+        log(f"Final selected indices remapped to original space: {len(all_indices)} frames")
 
         if save_data:
-            print(f"Saving files and metadata to: {out_path}...")
+            log(f"Saving files and metadata to: {out_path}...")
 
             frame_out_path = os.path.join(out_path, "frames")
             os.makedirs(frame_out_path, exist_ok=True)
-            print(f"Also saving filtered frames to: {frame_out_path}...")
             self.export_frames(chosen_frames=filtered_frames, out_folder_name=frame_out_path, is_mask=False)
             np.save(os.path.join(out_path, "frames.npy"), filtered_frames)
 
             if filtered_masks is not None:
                 mask_out_path = os.path.join(out_path, "masks")
                 os.makedirs(mask_out_path, exist_ok=True)
-                print(f"Also saving filtered masks to: {mask_out_path}...")
                 self.export_frames(chosen_frames=filtered_masks, out_folder_name=mask_out_path, is_mask=True)
                 np.save(os.path.join(out_path, "masks.npy"), filtered_masks)
 
@@ -1156,18 +1172,22 @@ class DiversitySampler:
             np.save(os.path.join(out_path, "diverse_indices.npy"), np.array(all_indices))
 
             metadata = {
-                'original_num_frames': original_num_frames,
+                "original_num_frames": original_num_frames,
                 "n_clusters": int(n_clusters),
                 "cluster_labels": [int(i) for i in cluster_labels],
-                "num_frames_selected": len(data_arr),
+                "num_frames_selected": len(all_indices),
                 "all_indices": [int(i) for i in all_indices],
             }
             with open(os.path.join(out_path, "diversity_metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=2)
+            log(f"Saved diversity_metadata.json")
 
             if frame_metadata is not None:
                 index_map = {int(i): str(frame_metadata[i]) for i in all_indices}
                 with open(os.path.join(out_path, "index_to_frame.json"), "w") as f:
                     json.dump(index_map, f, indent=2)
+                log(f"Saved index_to_frame.json")
+
+            log(f"Diversity sampling complete — {len(all_indices)} frames saved to {out_path}")
 
         return num_samples, filtered_frames, filtered_masks, all_indices, out_path
