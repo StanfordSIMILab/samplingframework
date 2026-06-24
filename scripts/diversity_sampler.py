@@ -483,7 +483,7 @@ class DiversitySampler:
             c=cluster_labels[valid_mask],
             cmap="tab20",
         )
-        plt.title(f"Cluster Visualization (DB Index = {db_score:.4f})")
+        plt.title(f"Cluster Visualization (Davies-Bouldin Index = {db_score:.4f})")
         plt.xlabel("PC 1")
         plt.ylabel("PC 2")
         plt.tight_layout()
