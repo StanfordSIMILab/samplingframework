@@ -1,6 +1,5 @@
 # configuration.yaml
 
-
 # Load Dataset Parameters:
 data:
   data_dir: "/path/to/your/data"
