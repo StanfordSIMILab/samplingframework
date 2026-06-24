@@ -19,9 +19,12 @@ partitioning:
 # Diversity sampling parameters
 sampling:
   keep_interactive: false
+  filter: 'fvi'                # optional pre-filtering: 'fvi', if keep_interactive=false, default elbow method
+  filter_thresh: null          # optional user threshold if keep_interactive=false, default elbow method
 
 # Evaluation parameters
 evaluation:
   div_eval: false
   task_evaluation: "segmentation"   # 'segmentation' or 'phase_classification'
   model_name: null                  # 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
+  num_epochs: 30

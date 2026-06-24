@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 import re
 from PIL import Image
+import shutil
 
 
 def train_val_test_split(
@@ -16,6 +17,7 @@ def train_val_test_split(
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     data_folder = Path(data_folder)
+    frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
     processed_dir = data_folder / "processed"
 
     if not processed_dir.exists():
@@ -62,9 +64,12 @@ def train_val_test_split(
             np.save(split_dir / "masks.npy", masks[idx])
         if labels is not None:
             np.save(split_dir / "labels.npy", labels[idx])
+        if frame_metadata is not None:
+            np.save(split_dir / "frame_metadata.npy", frame_metadata[idx])
+            with open(processed_dir / "frame_metadata.json", "w") as f:
+                json.dump({str(i): str(m) for i, m in enumerate(frame_metadata)}, f, indent=2)
 
     if (processed_dir / "color_map.json").exists():
-        import shutil
         shutil.copy(processed_dir / "color_map.json", split_data_dir / "color_map.json")
 
     print(f"\nSplit summary: train={len(train_idx)}  val={len(val_idx)}  test={len(test_idx)}")
@@ -78,9 +83,8 @@ def split_by_directory(
         target_size: tuple[int, int] | None = None,
     ) -> None:
 
-    from PIL import Image
-
     data_folder = Path(data_folder)
+    frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
     split_data_dir = data_folder / "split_data"
     split_data_dir.mkdir(parents=True, exist_ok=True)
     processed_dir = data_folder / "processed"
@@ -126,7 +130,6 @@ def split_by_directory(
             offset += n_per_split
 
         if (processed_dir / "color_map.json").exists():
-            import shutil
             shutil.copy(processed_dir / "color_map.json", split_data_dir / "color_map.json")
 
         print(f"Saved directory-inferred splits to {split_data_dir}")

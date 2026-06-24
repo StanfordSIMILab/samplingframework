@@ -240,7 +240,7 @@ def convert_coco_to_png_masks(
         h, w = img_info["height"], img_info["width"]
         frame_name = os.path.splitext(os.path.basename(img_info["file_name"]))[0]
 
-        combined_mask = np.zeros((h, w), dtype=np.uint8)
+        combined_mask = np.zeros((h, w), dtype=np.uint16)
 
         for ann in anns:
             category_id = ann.get("category_id", 0)

@@ -31,48 +31,67 @@ if __name__ == "__main__":
     Full data_folder structure after running script:
     data_folder/
     ├── [raw input data]
-    ├── sampling_pipeline_data.txt      # pipeline logger — all steps, timestamps
+    ├── sampling_pipeline_data.txt       # pipeline logger — all steps, timestamps
     ├── processed/
     │   ├── frames.npy
-    │   ├── masks.npy                   # if annotated
-    │   ├── labels.npy                  # if pitvis
-    │   └── color_map.json              # if annotated
+    │   ├── masks.npy                    # if annotated
+    │   ├── labels.npy                   # if pitvis
+    │   ├── color_map.json               # if annotated
+    │   ├── frame_metadata.json          # save the mappings of indexes to video/frame
+    │   └── frame_metadata.npy           # frame_metadata for downstream tasks
     ├── split_data/
     │   ├── color_map.json
     │   ├── train/
     │   │   ├── frames.npy
     │   │   ├── masks.npy
     │   │   ├── indices.npy
+    │   │   ├── frame_metadata.json      # save the mappings of indexes to video/frame
+    │   │   ├── frame_metadata.npy       # frame_metadata for downstream tasks
     │   │   ├── diversity/
     │   │   │   ├── frames.npy
     │   │   │   ├── masks.npy
-    │   │   │   ├── frames/             # exported PNGs
-    │   │   │   ├── masks/              # exported PNGs
+    │   │   │   ├── frames/              # exported PNGs
+    │   │   │   ├── masks/               # exported PNGs
     │   │   │   ├── all_embeddings.npy
     │   │   │   ├── diverse_indices.npy
+    │   │   │   ├── index_to_frame.json  # save the mappings of indexes to video/frame
     │   │   │   └── diversity_metadata.json
+    │   │   │   └── cluster_eval/
+    │   │   │       ├── cluster_vis.png
+    │   │   │       ├── cluster_iso_dist.png
+    │   │   │       ├── cluster_tightness_graph.png
+    │   │   │       ├── cluster_pairwise_ssim.png
+    │   │   │       ├── clusters_inner_dist.png
+    │   │   │       ├── centroid_pdist.png
+    │   │   │       ├── ssim_cluster_rep.png
+    │   │   │       ├── cluster_quality_score.png
+    │   │   │       └── optimal_k.png
     │   │   └── random/
     │   │       ├── frames.npy
-    │   │       └── masks.npy
-    │   ├── val/                        # if val_prop > 0
+    │   │       ├── masks.npy
+    │   │       ├── random_indices.npy
+    │   │       └── index_to_frame.json  # save the mappings of indexes to video/frame
+    │   ├── val/                         # if val_prop > 0
     │   │   ├── frames.npy
-    │   │   └── masks.npy
+    │   │   ├── masks.npy
+    │   │   ├── indices.npy
+    │   │   ├── frame_metadata.json      # save the mappings of indexes to video/frame
+    │   │   └── frame_metadata.npy       # frame_metadata for downstream tasks
     │   └── test/
     │       ├── frames.npy
-    │       └── masks.npy
-    └── eval_outputs/                   # if div_eval=true
-        ├── evaluation_metrics.txt      # from eval logger
-        ├── training_comparison/        # compare how well did the model learn
+    │       ├── masks.npy
+    │       ├── indices.npy
+    │       ├── frame_metadata.json      # save the mappings of indexes to video/frame
+    │       └── frame_metadata.npy       # frame_metadata for downstream tasks
+    └── eval_outputs/                    # if div_eval=true
+        ├── evaluation_metrics.txt       # from eval logger
+        ├── training_comparison/         # compare how well did the model learn
         │   ├── training_curves.png
         │   ├── confusion_matrices.png
         │   ├── per_class_f1.png
         │   └── balanced_accuracy.png
-        └── data_coverage/              # compare how good was the sampling
-            ├── cluster_vis.png
-            ├── cluster_iso_dist.png
-            ├── cluster_tightness_graph.png
-            ├── optimal_k.png
-            ├── coverage_redundancy.png
+        └── data_coverage/               # compare how good was the sampling
+            ├── hausdorff_coverage_redundancy.png
             ├── nn_coverage.png
             ├── pca_coverage_heatmap.png
             └── umap_selected.png
@@ -102,10 +121,13 @@ if __name__ == "__main__":
     val_prop       = cfg["partitioning"]["val_prop"]
 
     keep_interactive = cfg["sampling"]["keep_interactive"]
+    use_filter = cfg["sampling"]["use_filter"]
+    filter_thresh = cfg["sampling"]["filter_thresh"]
 
     div_eval         = cfg["evaluation"]["div_eval"]
     task_evaluation  = cfg["evaluation"]["task_evaluation"]
     model_name       = cfg["evaluation"]["model_name"]
+    num_epochs       = cfg["evaluation"]["num_epochs"]
 
     # Configure logger:
     log_path = data_folder / "sampling_pipeline_log.txt"
@@ -131,6 +153,8 @@ if __name__ == "__main__":
         emb_model="openclip",
         method="kmeans_elbow",
         keep_interactive = keep_interactive
+        use_filter = use_filter
+        filter_thresh = filter_thresh
     )
 
     # Load and process data
@@ -186,11 +210,14 @@ if __name__ == "__main__":
     if skip_split:
         train_frames = frames
         train_masks  = masks
+        train_frame_metadata = frame_metadata
     else:
         logger.info("Loading train split...")
         train_frames = np.load(split_data_dir / "train" / "frames.npy")
         train_masks_path = split_data_dir / "train" / "masks.npy"
         train_masks = np.load(train_masks_path) if train_masks_path.exists() else None
+        train_metadata_path = split_data_dir / "train" / "frame_metadata.npy"
+        train_frame_metadata = np.load(train_metadata_path, allow_pickle=True) if train_metadata_path.exists() else None
 
     num_train_samples = int(train_prop * len_total_frames)
 
@@ -204,6 +231,7 @@ if __name__ == "__main__":
         run_eval=div_eval,
         save_data=True,
         data_dir=str(diversity_out),
+        frame_metadata=train_frame_metadata,
     )
     logger.info(f"Diversity sampling complete — selected {len(div_indices)} frames")
 
@@ -214,8 +242,14 @@ if __name__ == "__main__":
     random_out = split_data_dir / "train" / "random"
     random_out.mkdir(parents=True, exist_ok=True)
     np.save(random_out / "frames.npy", train_frames[random_indices])
+    np.save(random_out / "random_indices.npy", random_indices)
     if train_masks is not None:
         np.save(random_out / "masks.npy", train_masks[random_indices])
+    if train_frame_metadata is not None:
+        np.save(random_out / "frame_metadata.npy", train_frame_metadata[random_indices])
+        index_map = {int(i): str(train_frame_metadata[i]) for i in random_indices}
+        with open(random_out / "index_to_frame.json", "w") as f:
+            json.dump(index_map, f, indent=2)
 
     if div_eval:
         logger.info("Running model training evaluation...")
@@ -256,6 +290,14 @@ if __name__ == "__main__":
             output_dir=str(data_folder / "eval_outputs"),
             model_name=model_name,
             num_classes=num_classes,
+            num_epochs=num_epochs
+            div_frames=div_frames,
+            div_masks=div_masks,
+            div_indices=np.array(div_indices),
+            rand_frames=train_frames[random_indices],
+            rand_masks=train_masks[random_indices] if train_masks is not None else None,
+            rand_indices=random_indices,
+            all_emb=np.load(str(diversity_out / "diversity" / "all_embeddings.npy")),
         )
 
     logger.info("Done!")

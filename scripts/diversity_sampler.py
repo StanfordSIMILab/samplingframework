@@ -360,7 +360,7 @@ class DiversitySampler:
             ax.set_title(title)
             ax.set_ylim(0, max(vals) * 1.2)
         plt.tight_layout()
-        plt.savefig(f"{save_path}/coverage_redundancy.png", dpi=150) if self.save_plots or save_plot else None
+        plt.savefig(f"{save_path}/hausdorff_coverage_redundancy.png", dpi=150) if self.save_plots or save_plot else None
         plt.show()
         plt.close()
     
@@ -916,14 +916,16 @@ class DiversitySampler:
     # Main function to create diverse training dataset from frames w/ optional mask.
     # Saves all_embeddings.npy and diverse_indices.npy to <data_dir>/diversity/
     def sample(self, 
-        data_arr, # numpy array of images
+        data_arr=None, # numpy array of images
         mask_arr=None, # optional: numpy array of corresponding masks
+        frame_metadata=None, # Metadata produces by data manager/partioner to map indices selected to frame names
         num_samples=None, # custom final number of samples desired
-        percent_sample=0.1, # alternative to num_samples, sample {percent_sample} from total
+        percent_sample=0.5, # alternative to num_samples, sample {percent_sample} from total
         emb_prev=None, # optional: use one's own embeddings for diversity sampling
         emb_model=None, # if you want to designate a specific embedding model
         method=None, # If you want to designate a specific embedding model
-        filter=None, # Optional: Parameter to select pre-filtering method: "fvi"
+        use_filter=None, # Optional: Parameter to select pre-filtering method: "fvi"
+        filter_thresh = None, # If using filter, optional provide filter thresh 
         run_eval=True, # Allow for running tightness/iso distances for clusters in data, optional interactive
         ssim_n=10, # If evaluating SSIM clustering distance, how many points per cluster should be used
         save_data=False, # Whether to save plots and metrics
@@ -946,7 +948,7 @@ class DiversitySampler:
 
         # Determine number of samples in final diversity sampled dataset
         if num_samples is None:
-            # Sample 10% of frames by default unless user specifies otherwise
+            # Sample 50% of frames by default unless user specifies otherwise
             num_samples = int(len(data_arr) * percent_sample)
 
         # Determine embeddings for entire data array
@@ -964,66 +966,83 @@ class DiversitySampler:
                 raise ValueError("Must specify a valid embedding model. Choose 'dino' or 'openclip'.")
 
         filtered_indexes = None
-        if filter is not None:
-            if filter == "fvi":
-                while True:
-                    raw = input(
-                        "FVI filtering method — elbow, percentile, custom (or Enter to skip): "
-                    ).strip().lower()
+        if use_filter is not None:
+            if self.keep_interactive:
+                if use_filter == "fvi":
+                    while True:
+                        raw = input(
+                            "FVI filtering method — elbow, percentile, custom (or Enter to skip): "
+                        ).strip().lower()
 
-                    if raw == "":
-                        break
+                        if raw == "":
+                            break
 
-                    if raw == "elbow":
+                        if raw == "elbow":
+                            filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
+                            show_fvi_histogram(scores=scores, save_path=out_path)
+                            data_arr = filtered_data_arr
+                            if mask_arr is not None:
+                                mask_arr = mask_arr[filtered_indexes]
+                            break
+
+                        elif raw == "percentile":
+                            while True:
+                                raw2 = input("Percentile (0-100): ").strip()
+                                try:
+                                    percentile = int(raw2)
+                                    if not 0 <= percentile <= 100:
+                                        print("  Enter an integer between 0 and 100.")
+                                        continue
+                                    filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
+                                        data_arr=data_arr, percentile=percentile, use_elbow=False
+                                    )
+                                    show_fvi_histogram(scores=scores, save_path=out_path)
+                                    data_arr = filtered_data_arr
+                                    if mask_arr is not None:
+                                        mask_arr = mask_arr[filtered_indexes]
+                                    break
+                                except ValueError:
+                                    print("  Enter a valid integer.")
+                            break
+
+                        elif raw == "custom":
+                            while True:
+                                raw2 = input("Threshold (float): ").strip()
+                                try:
+                                    thresh = float(raw2)
+                                    filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
+                                        data_arr=data_arr, thresh=thresh, use_elbow=False
+                                    )
+                                    show_fvi_histogram(scores=scores, save_path=out_path)
+                                    data_arr = filtered_data_arr
+                                    if mask_arr is not None:
+                                        mask_arr = mask_arr[filtered_indexes]
+                                    break
+                                except ValueError:
+                                    print("  Enter a valid float.")
+                            break
+
+                        else:
+                            print("  Enter 'elbow', 'percentile', or 'custom'.")
+
+                else:
+                    raise ValueError(f"Unknown filter {filter!r}. Choose 'fvi'.")
+
+            else:
+                if use_filter == "fvi"
+                    # If not interactive, default to using elbow method unless filter_thresh provided
+                    if filter_thresh is not None:
+                        filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr=data_arr, thresh=filter_thresh, use_elbow=False)
+                        show_fvi_histogram(scores=scores, save_path=out_path)
+                        data_arr = filtered_data_arr
+                        if mask_arr is not None:
+                            mask_arr = mask_arr[filtered_indexes]
+                    else:
                         filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
                         show_fvi_histogram(scores=scores, save_path=out_path)
                         data_arr = filtered_data_arr
                         if mask_arr is not None:
                             mask_arr = mask_arr[filtered_indexes]
-                        break
-
-                    elif raw == "percentile":
-                        while True:
-                            raw2 = input("Percentile (0-100): ").strip()
-                            try:
-                                percentile = int(raw2)
-                                if not 0 <= percentile <= 100:
-                                    print("  Enter an integer between 0 and 100.")
-                                    continue
-                                filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
-                                    data_arr=data_arr, percentile=percentile, use_elbow=False
-                                )
-                                show_fvi_histogram(scores=scores, save_path=out_path)
-                                data_arr = filtered_data_arr
-                                if mask_arr is not None:
-                                    mask_arr = mask_arr[filtered_indexes]
-                                break
-                            except ValueError:
-                                print("  Enter a valid integer.")
-                        break
-
-                    elif raw == "custom":
-                        while True:
-                            raw2 = input("Threshold (float): ").strip()
-                            try:
-                                thresh = float(raw2)
-                                filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
-                                    data_arr=data_arr, thresh=thresh, use_elbow=False
-                                )
-                                show_fvi_histogram(scores=scores, save_path=out_path)
-                                data_arr = filtered_data_arr
-                                if mask_arr is not None:
-                                    mask_arr = mask_arr[filtered_indexes]
-                                break
-                            except ValueError:
-                                print("  Enter a valid float.")
-                        break
-
-                    else:
-                        print("  Enter 'elbow', 'percentile', or 'custom'.")
-
-            else:
-                raise ValueError(f"Unknown filter {filter!r}. Choose 'fvi'.")
 
         # Filter embeddings if specified
         emb_for_clustering = all_emb[filtered_indexes] if filtered_indexes is not None else all_emb
@@ -1050,7 +1069,7 @@ class DiversitySampler:
         last_closest_points = closest_points
 
         if run_eval:
-            coverage_dir = os.path.join(out_path, "data_coverage") if out_path else None
+            coverage_dir = os.path.join(out_path, "cluster_eval") if out_path else None
             if coverage_dir:
                 os.makedirs(coverage_dir, exist_ok=True)
 
@@ -1101,5 +1120,12 @@ class DiversitySampler:
             }
             with open(os.path.join(out_path, "diversity_metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=2)
+
+            index_map = {int(i): str(frame_metadata[i]) for i in all_indices}
+
+            frame_metadata is not None:
+                index_map = {int(i): str(frame_metadata[i]) for i in all_indices}
+                with open(os.path.join(out_path, "index_to_frame.json"), "w") as f:
+                    json.dump(index_map, f, indent=2)
 
         return num_samples, filtered_frames, filtered_masks, all_indices

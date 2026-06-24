@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 from PIL import Image
 
+from auxiliary.convert_coco import convert_coco_to_png_masks
 from frame_extractor import load_video, process_video, process_videos, VIDEO_EXTENSIONS
 from auxiliary import pitvis_extractor
 
@@ -21,8 +22,6 @@ def load_frames_and_masks(
         global_color_map: dict | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
 
-    from convert_coco import convert_coco_to_png_masks
-
     data_folder = Path(data_folder)
     if not data_folder.exists():
         raise FileNotFoundError(f"Data folder not found: {data_folder}")
@@ -32,18 +31,20 @@ def load_frames_and_masks(
         print(f"Loading from existing processed directory: {processed_dir}")
         frames = np.load(processed_dir / "frames.npy")
         masks  = np.load(processed_dir / "masks.npy")
+        frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
         with open(processed_dir / "color_map.json") as f:
             color_map = {int(k): v for k, v in json.load(f).items()}
         if (processed_dir / "labels.npy").exists():
             labels = np.load(processed_dir / "labels.npy", allow_pickle=True)
-            return frames, masks, color_map, labels
-        return frames, masks, color_map
+            return frames, masks, color_map, labels, frame_metadata
+        return frames, masks, color_map, frame_metadata
 
     load_as_rgb = mask_type == "color_mask" or force_color_processing
     mask_mode = "RGB" if load_as_rgb else "L"
     excluded = {"masks", "annotations", "mask", "processed", "split_data"}
 
     frame_paths = []
+    frame_metadata = []
 
     if dataset_style == "cholec":
         video_dirs = sorted(
@@ -62,6 +63,7 @@ def load_frames_and_masks(
                             continue
                         if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                             frame_paths.append(f)
+                            frame_metadata.append(f"{video_dir.name}_{f.stem}")
 
     elif dataset_style == "flat":
         for f in sorted(data_folder.iterdir()):
@@ -69,6 +71,7 @@ def load_frames_and_masks(
                 continue
             if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                 frame_paths.append(f)
+                frame_metadata.append(f.stem)
 
     elif dataset_style == "nested":
         subdirs = sorted(
@@ -85,6 +88,7 @@ def load_frames_and_masks(
                     continue
                 if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                     frame_paths.append(f)
+                    frame_metadata.append(f"{subdir.name}_{f.stem}")
 
     elif dataset_style == "pitvis":
         video_ids = (
@@ -111,6 +115,7 @@ def load_frames_and_masks(
                 if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                     frame_paths.append(f)
                     pitvis_meta.append((vid_id, int(f.stem)))
+                    frame_metadata.append(f"video_{vid_id:02d}_{f.stem}")
 
     else:
         raise ValueError(
@@ -149,7 +154,7 @@ def load_frames_and_masks(
 
     n = len(frame_paths)
     frames = np.empty((n, h, w, 3), dtype=np.uint8)
-    masks  = np.empty((n, h, w, 3 if load_as_rgb else 1), dtype=np.uint8)
+    masks  = np.empty((n, h, w, 3 if load_as_rgb else 1), dtype=np.uint16)
 
     missing_masks = []
 
@@ -163,14 +168,14 @@ def load_frames_and_masks(
             continue
 
         frame_img = Image.open(frame_path).convert("RGB")
-        mask_img  = Image.open(mask_path).convert(mask_mode)
+        mask_img  = Image.open(mask_path)
 
         if target_size is not None:
             frame_img = frame_img.resize((w, h), Image.BILINEAR)
             mask_img  = mask_img.resize((w, h), Image.NEAREST)
 
         frames[i] = np.array(frame_img, dtype=np.uint8)
-        mask_np   = np.array(mask_img, dtype=np.uint8)
+        mask_np   = np.array(mask_img, dtype=np.uint16)
         masks[i]  = mask_np if mask_np.ndim == 3 else mask_np[..., np.newaxis]
 
     if missing_masks:
@@ -194,7 +199,7 @@ def load_frames_and_masks(
         rgb_to_cls = {tuple(color): idx for idx, color in global_color_map.items()}
         N, H, W, _ = masks.shape
         flat = masks.reshape(-1, 3)
-        flat_out = np.zeros(flat.shape[0], dtype=np.uint8)
+        flat_out = np.zeros(flat.shape[0], dtype=np.uint16)
         for rgb_tuple, cls in rgb_to_cls.items():
             flat_out[np.all(flat == np.array(rgb_tuple), axis=1)] = cls
         masks = flat_out.reshape(N, H, W)
@@ -205,9 +210,14 @@ def load_frames_and_masks(
         unique_vals = np.unique(masks)
         print(f"Finished processing masks. Unique values found: {unique_vals}")
 
+    frame_metadata = np.array(frame_metadata)
+
     processed_dir.mkdir(parents=True, exist_ok=True)
     np.save(processed_dir / "frames.npy", frames)
     np.save(processed_dir / "masks.npy", masks)
+    np.save(processed_dir / "frame_metadata.npy", frame_metadata)
+    with open(processed_dir / "frame_metadata.json", "w") as f:
+        json.dump({str(i): str(m) for i, m in enumerate(frame_metadata)}, f, indent=2)
     with open(processed_dir / "color_map.json", "w") as f:
         json.dump({str(k): v for k, v in color_map.items()}, f, indent=2)
     print(f"Saved processed data to {processed_dir}")
@@ -216,16 +226,16 @@ def load_frames_and_masks(
         labels = pitvis_extractor.get_pitvis_labels(annot_index, pitvis_meta)
         np.save(processed_dir / "labels.npy", labels)
         print(f"Finished loading pitvis labels. Shape: {labels.shape}")
-        return frames, masks, color_map, labels
+        return frames, masks, color_map, labels, frame_metadata
 
-    return frames, masks, color_map
+    return frames, masks, color_map, frame_metadata
 
 
 def load_frames_from_dir(
         data_folder: str | Path,
         target_size: tuple[int, int] | None = None,
         exclude: set[str] | None = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
 
     data_folder = Path(data_folder)
     excluded = exclude or {"masks", "annotations", "mask", "processed", "split_data"}
@@ -233,9 +243,12 @@ def load_frames_from_dir(
     processed_dir = data_folder / "processed"
     if (processed_dir / "frames.npy").exists():
         print(f"Loading from existing processed directory: {processed_dir}")
-        return np.load(processed_dir / "frames.npy")
+        frames = np.load(processed_dir / "frames.npy")
+        frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
+        return frames, frame_metadata
 
     frames_list = []
+    frame_metadata = []
 
     for frame in sorted(data_folder.rglob("*")):
         if any(exc in part for part in frame.parts for exc in excluded):
@@ -247,17 +260,22 @@ def load_frames_from_dir(
             h, w = target_size
             img = img.resize((w, h), Image.BILINEAR)
         frames_list.append(np.array(img, dtype=np.uint8))
+        frame_metadata.append(frame.stem)
 
     if not frames_list:
         raise FileNotFoundError(f"No image files found under {data_folder}")
 
     frames = np.stack(frames_list, axis=0)
+    frame_metadata = np.array(frame_metadata)
 
     processed_dir.mkdir(parents=True, exist_ok=True)
     np.save(processed_dir / "frames.npy", frames)
+    np.save(processed_dir / "frame_metadata.npy", frame_metadata)
+    with open(processed_dir / "frame_metadata.json", "w") as f:
+        json.dump({str(i): str(m) for i, m in enumerate(frame_metadata)}, f, indent=2)
     print(f"Saved processed frames to {processed_dir}")
 
-    return frames
+    return frames, frame_metadata
 
 
 def export_frames(
@@ -304,7 +322,7 @@ def apply_color_map(masks: np.ndarray, color_map: dict) -> np.ndarray:
     rgb_to_cls = {tuple(color): idx for idx, color in color_map.items()}
     N, H, W, _ = masks.shape
     flat = masks.reshape(-1, 3)
-    flat_out = np.zeros(flat.shape[0], dtype=np.uint8)
+    flat_out = np.zeros(flat.shape[0], dtype=np.uint16)
     for rgb_tuple, cls in rgb_to_cls.items():
         flat_out[np.all(flat == np.array(rgb_tuple), axis=1)] = cls
     return flat_out.reshape(N, H, W)

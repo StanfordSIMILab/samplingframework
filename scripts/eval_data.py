@@ -404,7 +404,7 @@ def train_segmentation_model(
     )
 
 # Plot utilities
-def plot_training_curves(hist_div: dict, hist_rand: dict, output_dir: str) -> None:
+def plot_training_curves(model_name: str | None = None, hist_div: dict, hist_rand: dict, output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -417,13 +417,17 @@ def plot_training_curves(hist_div: dict, hist_rand: dict, output_dir: str) -> No
         ax.set_xlabel("Epoch")
         ax.set_ylabel(ylabel)
         ax.legend()
-    fig.suptitle("Training curves — diverse vs random", fontsize=13)
+    if model_name is not None:
+        fig.suptitle(f"{model_name} Training curves — diverse vs random", fontsize=13)
+    else:
+        fig.suptitle("Training curves — diverse vs random", fontsize=13)
     plt.tight_layout()
     plt.savefig(f"{output_dir}/training_curves.png", dpi=150)
     plt.show()
 
 
 def plot_confusion_matrices(
+    model_name: str | None = None,
     preds_div: np.ndarray,
     gts_div: np.ndarray,
     preds_rand: np.ndarray,
@@ -451,13 +455,17 @@ def plot_confusion_matrices(
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         plt.colorbar(im, ax=ax)
-    fig.suptitle("Normalised confusion matrix", fontsize=13)
+    if model_name is not None:
+        fig.suptitle(f"{model_name} Normalised confusion matrix", fontsize=13)
+    else:
+        fig.suptitle("Normalised confusion matrix", fontsize=13)
     plt.tight_layout()
     plt.savefig(f"{output_dir}/confusion_matrices.png", dpi=150)
     plt.show()
 
 
 def plot_per_class_f1(
+    model_name: str | None = None,
     preds_div: np.ndarray,
     gts_div: np.ndarray,
     preds_rand: np.ndarray,
@@ -480,14 +488,22 @@ def plot_per_class_f1(
     ax.set_xticklabels(class_names, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("F1 score")
     ax.set_ylim(0, 1)
-    ax.set_title("Per-class F1 — diverse vs random")
+    if model_name is not None
+        ax.set_title(f"{model_name} Per-class F1 — diverse vs random")
+    else:
+        ax.set_title("Per-class F1 — diverse vs random")
     ax.legend()
     plt.tight_layout()
     plt.savefig(f"{output_dir}/per_class_f1.png", dpi=150)
     plt.show()
 
 
-def plot_balanced_accuracy(bal_div: float, bal_rand: float, output_dir: str) -> None:
+def plot_balanced_accuracy(
+    model_name: str | None = None,
+    bal_div: float, 
+    bal_rand: float, 
+    output_dir: str
+) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(5, 5))
@@ -517,6 +533,13 @@ def main(
     model_name: str | None = None,
     num_classes: int | None = None,
     num_epochs: int = 30,
+    div_frames: np.ndarray | None = None,   # If diversity sampling already performed
+    div_masks: np.ndarray | None = None,    # If diversity sampling already performed
+    div_indices: np.ndarray | None = None,  # If diversity sampling already performed
+    rand_frames: np.ndarray | None = None,  # If diversity sampling already performed
+    rand_masks: np.ndarray | None = None,   # If diversity sampling already performed
+    rand_indices: np.ndarray | None = None, # If diversity sampling already performed
+    all_emb: np.ndarray | None = None,
 ) -> None:
     # Set-up output structure
     training_dir = os.path.join(output_dir, "training_comparison")
@@ -531,12 +554,12 @@ def main(
     logger.info(f"Dataset root: {dataset_root}")
 
     if dataset_style == "pitvis":
-        frames_train, _, color_map, labels_train_raw = dm.load_frames_and_masks(
+        frames_train, _, color_map, labels_train_raw, _ = dm.load_frames_and_masks(
             data_folder=dataset_root,
             videos=[str(v) for v in train_videos] if train_videos else None,
             dataset_style="pitvis",
         )
-        frames_val, _, _, labels_val_raw = dm.load_frames_and_masks(
+        frames_val, _, _, labels_val_raw, _ = dm.load_frames_and_masks(
             data_folder=dataset_root,
             videos=[str(val_video)] if val_video is not None else None,
             dataset_style="pitvis",
@@ -561,13 +584,13 @@ def main(
         labels_val = remap(labels_val_raw[:, 0])
 
     else:
-        frames_train, masks_train, color_map = dm.load_frames_and_masks(
+        frames_train, masks_train, color_map, _ = dm.load_frames_and_masks(
             data_folder=dataset_root,
             videos=[str(v) for v in train_videos] if train_videos else None,
             dataset_style=dataset_style,
         )
         _val_root = val_root if val_root is not None else dataset_root
-        frames_val, masks_val, _ = dm.load_frames_and_masks(
+        frames_val, masks_val, _, _ = dm.load_frames_and_masks(
             data_folder=_val_root,
             videos=[str(val_video)] if val_video is not None else None,
             dataset_style=dataset_style,
@@ -584,48 +607,62 @@ def main(
 
     all_frames = frames_train
 
-    sampler = DiversitySampler(
-        optim_clusters=True,
-        dino_model_string="dinov2_vits14",
-        n_samples_per_cluster=5,
-        viz_clusters=True,
-        plot_chosen_frames=False,
-        openclip_model_string="ViT-B-32",
-        openclip_pretrained="laion2b_s34b_b79k",
-        emb_model="openclip",
-        method="kmeans_sil",
-    )
+    if div_frames is None:
+        sampler = DiversitySampler(
+            optim_clusters=True,
+            dino_model_string="dinov2_vits14",
+            n_samples_per_cluster=5,
+            viz_clusters=True,
+            plot_chosen_frames=False,
+            openclip_model_string="ViT-B-32",
+            openclip_pretrained="laion2b_s34b_b79k",
+            emb_model="openclip",
+            method="kmeans_sil",
+        )
 
-    all_emb = sampler.run_openclip(all_frames)
+        all_emb = sampler.run_openclip(all_frames)
 
-    n_sampled, _, _, diverse_indices = sampler.sample(
-        data_arr=all_frames,
-        emb_prev=all_emb,
-        method="kmeans_sil",
-        run_eval=True,
-        save_data=True,
-        data_dir=output_dir,
-    )
+        n_sampled, _, _, diverse_indices = sampler.sample(
+            data_arr=all_frames,
+            emb_prev=all_emb,
+            method="kmeans_sil",
+            run_eval=True,
+            save_data=True,
+            data_dir=output_dir,
+        )
 
-    diverse_indices = np.array(diverse_indices)
-    random_indices = np.random.choice(len(all_frames), size=len(diverse_indices), replace=False)
+        diverse_indices = np.array(diverse_indices)
+        random_indices = np.random.choice(len(all_frames), size=len(diverse_indices), replace=False)
 
-    x_div  = all_frames[diverse_indices]
-    y_div  = all_labels_train[diverse_indices]
-    x_rand = all_frames[random_indices]
-    y_rand = all_labels_train[random_indices]
+        x_div  = all_frames[diverse_indices]
+        y_div  = all_labels_train[diverse_indices]
+        x_rand = all_frames[random_indices]
+        y_rand = all_labels_train[random_indices]
+        sampler.evaluate_vs_other(
+            random_indices=random_indices,
+            all_emb=all_emb,
+            diverse_indices=diverse_indices,
+            save_dir=coverage_dir,
+            save_plot=True,
+        )
+    else:
+        x_div  = div_frames
+        y_div  = all_labels_train[div_indices]
+        x_rand = rand_frames
+        y_rand = all_labels_train[rand_indices]
 
-    sampler.evaluate_vs_other(
-        random_indices=random_indices,
-        all_emb=normalize(all_emb),
-        diverse_indices=diverse_indices,
-        save_dir=coverage_dir,
-        save_plot=True,
-    )
+        sampler = DiversitySampler(emb_model="openclip", method="kmeans_sil")
+        sampler.evaluate_vs_other(
+            random_indices=rand_indices,
+            all_emb=all_emb,
+            diverse_indices=div_indices,
+            save_dir=coverage_dir,
+            save_plot=True,
+        )
 
-    print(f"\nx_div: {x_div.shape}  y_div: {y_div.shape}")
-    print(f"x_rand: {x_rand.shape}  y_rand: {y_rand.shape}")
-    print(f"x_val: {frames_val.shape}  labels_val: {labels_val.shape}")
+    logger.info(f"\nx_div: {x_div.shape}  y_div: {y_div.shape}")
+    logger.info(f"x_rand: {x_rand.shape}  y_rand: {y_rand.shape}")
+    logger.info(f"x_val: {frames_val.shape}  labels_val: {labels_val.shape}")
 
     if task == "phase_classification":
         print("\nTraining on diverse dataset...")
@@ -648,19 +685,18 @@ def main(
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
 
-    plot_training_curves(hist_div, hist_rand, training_dir)
+    plot_training_curves(model_name, hist_div, hist_rand, training_dir)
     plot_confusion_matrices(
-        preds_div, gts_div, preds_rand, gts_rand,
+        model_name, preds_div, gts_div, preds_rand, gts_rand,
         bal_div, bal_rand, num_classes, class_names, training_dir,
     )
     plot_per_class_f1(
-        preds_div, gts_div, preds_rand, gts_rand,
+        model_name, preds_div, gts_div, preds_rand, gts_rand,
         bal_div, bal_rand, num_classes, class_names, training_dir,
     )
-    plot_balanced_accuracy(bal_div, bal_rand, training_dir)
+    plot_balanced_accuracy(model_name, bal_div, bal_rand, training_dir)
 
     logger.info(f"\nBalanced accuracy — diverse: {bal_div:.4f}  |  random: {bal_rand:.4f}")
-
 
 if __name__ == "__main__":
     main(
