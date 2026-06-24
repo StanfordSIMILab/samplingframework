@@ -116,10 +116,11 @@ if __name__ == "__main__":
 
     skip_split     = cfg["partitioning"]["skip_split"]
     split_by_dir   = cfg["partitioning"]["split_by_dir"]
-    train_prop     = cfg["partitioning"]["train_prop"]
     test_prop      = cfg["partitioning"]["test_prop"]
     val_prop       = cfg["partitioning"]["val_prop"]
 
+    num_train_samples = = cfg["sampling"]["num_train_samples"]
+    train_prop     = cfg["sampling"]["train_prop"]
     keep_interactive = cfg["sampling"]["keep_interactive"]
     use_filter = cfg["sampling"]["use_filter"]
     filter_thresh = cfg["sampling"]["filter_thresh"]
@@ -219,7 +220,12 @@ if __name__ == "__main__":
         train_metadata_path = split_data_dir / "train" / "frame_metadata.npy"
         train_frame_metadata = np.load(train_metadata_path, allow_pickle=True) if train_metadata_path.exists() else None
 
-    num_train_samples = int(train_prop * len_total_frames)
+    if num_train_samples is not None:
+        num_train_samples = num_train_samples
+    elif train_prop is not None:
+        num_train_samples = int(train_prop * len(train_frames))
+    else:
+        raise ValueError("Please indicate either a percent of training data or a total sample size under sampling configuration")
 
     # Diversity Sampling
     logger.info(f"Running diversity sampling — target n={num_train_samples}...")

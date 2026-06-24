@@ -10,15 +10,17 @@ data:
 
 # Data partitioning parameters
 partitioning:
-  skip_split: false
-  split_by_dir: false
-  train_prop: 0.1
+  skip_split: false            # Optional, allow for partioning of data into train/test or train/val/test
+  split_by_dir: false          # Use key words in file names like val, test, train to partion data
   test_prop: 0.1
   val_prop: 0.0                # 0.0 to skip validation split
 
 # Diversity sampling parameters
 sampling:
-  keep_interactive: false
+  # Use either num_train_samples or train_prop, not both. Default is to num_train_samples if both indicated
+  num_train_samples: null      # total number of training samples to use to create diversity/randomly sampled dataset
+  train_prop: 0.1              # percent of total training frames to use to create diversity/randomly sampled dataset
+  keep_interactive: false      # optional: allow user to interactively reduce number of clusters/manage filter
   filter: 'fvi'                # optional pre-filtering: 'fvi', if keep_interactive=false, default elbow method
   filter_thresh: null          # optional user threshold if keep_interactive=false, default elbow method
 
