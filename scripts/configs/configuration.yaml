@@ -1,9 +1,10 @@
 # configuration.yaml
+# Run full pipeline from raw data to sampling to training evaluation, automatically resumes if halted between stages
 
 # Load Dataset Parameters:
 data:
-  data_dir: "/path/to/your/data"
-  annotated: True
+  data_dir: "/mnt/sda1/nishanr/Diversity_Sampling/Cholec8K"
+  annotated: True                 # Determine whether diversity sampling annotated vs. unannotated data
   dataset_style: "cholec"         # 'cholec', 'pitvis', 'flat', or 'nested' *more info at bottom
 
 # If annotated is True, allow user to choose task / set-up
@@ -15,23 +16,23 @@ annotation:
 
 # Allow users to split data
 partitioning:
-  skip_split: false
-  split_by_dir: false
+  skip_split: false              # Toggle whether to partion data or not
+  split_by_dir: true             # if folder/file names contain key words like train/val(idation)/test, split by name
   test_prop: 0.1                 # ignored if split_by_dir=true
   val_prop: 0.0                  # ignored if split_by_dir=true, 0.0 to skip validation split
 
 # Specific parameters for diversity sampling
 sampling:
-  num_train_samples: null        # total number of samples (takes priority over train_prop if both set)
+  num_train_samples: 1000        # total number of samples (set to null to prioritize train_prop)
   train_prop: 0.1                # proportion of train frames to select
-  keep_interactive: false
-  use_filter: null               # optional filter before div sampling: 'fvi'
+  keep_interactive: false        # Allow you to choose fvi filtering threshold and manually remove/recluster for diversity sampling
+  use_filter: fvi                # optional filter before div sampling: 'fvi'
 
 # Specific parameters for evaluating diversity / random on training model
 evaluation:
-  div_eval: false
-  model_name: null               # if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
-  num_epochs: 30
+  div_eval: true                 # Toggle on full random vs. diverse evaluation / training
+  model_name: 'segformer'      # only if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
+  num_epochs: 30                 # number of epochs to train model on segmentation vs. phase classification
   batch_size: 1                  # use batch_size=1 for SGD-style convergence tracking
 
 # *Different Dataset Structures supported*

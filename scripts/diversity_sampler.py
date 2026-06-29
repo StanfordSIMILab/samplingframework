@@ -1,5 +1,4 @@
-# diversity_sampler.py 
-# DiversitySampler class for performing diversity sampling on frames, with various clustering methods and evaluation metrics.
+# diversity_sampler.py -  diversity sampling on frames, with various clustering methods and evaluation metrics.
 from pathlib import Path
 from typing import Union
 import cv2
@@ -7,6 +6,7 @@ import tempfile, os
 import re
 import json
 import threading
+import logging
 
 import numpy as np
 import torch
@@ -99,15 +99,20 @@ class DiversitySampler:
             )
 
     # Helper function to determine number of samples from each cluster
-    def _n_for_cluster(self, num_train, cluster_labels, cluster_id):
+    def _n_for_cluster(self, num_train, cluster_labels, cluster_id, allocated_so_far=0, is_last=False):
         if not self.proportional_sampling:
             return self.n_samples_per_cluster
         total = np.sum(cluster_labels != -1)
         cluster_size = np.sum(cluster_labels == cluster_id)
+        # Make sure that proportional sampling always reaches desired target num_samples
+        if is_last:
+            return max(1, num_train - allocated_so_far)
         return max(1, round(num_train * cluster_size / total))
 
     # Embedding Methods
-    def run_dino(self, data_arr):
+    def run_dino(self, data_arr, logger=None,):
+        log = logger.info if logger else print
+
         transform = T.Compose(
             [
                 T.ToPILImage(),
@@ -128,10 +133,12 @@ class DiversitySampler:
         for out in all_out:
             all_emb.append(out["x_norm_clstoken"])
 
-        print(f"Extracted DINO embeddings for {len(all_emb)} frames, each of shape {all_emb[0].shape}")
+        log(f"Extracted DINO embeddings for {len(all_emb)} frames, each of shape {all_emb[0].shape}")
         return np.array(all_emb).squeeze(1)
 
-    def run_openclip(self, data_arr):
+    def run_openclip(self, data_arr, logger = None,):
+        log = logger.info if logger else print
+
         all_emb = []
         with torch.no_grad():
             for i, frame in enumerate(data_arr):
@@ -142,11 +149,14 @@ class DiversitySampler:
                 features = self.model.encode_image(img_tensor)
                 all_emb.append(features.cpu().numpy())
 
-        print(f"Extracted OpenCLIP embeddings for {len(all_emb)} frames, each of shape {all_emb[0].shape}")
+        log(f"Extracted OpenCLIP embeddings for {len(all_emb)} frames, each of shape {all_emb[0].shape}")
         return np.concatenate(all_emb, axis=0)
 
     # Clustering Methods
-    def run_dbscan(self, all_emb, num_train, epsilon=None, min_samples=5):
+    def run_dbscan(self, all_emb, num_train, epsilon=None, min_samples=5, logger=None,):
+        log = logger.info if logger else print
+
+        log("Running DBSCAN algorithm on training data")
         if epsilon is None:
             k = min_samples
             nbrs = NearestNeighbors(n_neighbors=k).fit(all_emb)
@@ -163,13 +173,13 @@ class DiversitySampler:
                 if knee.knee is not None
                 else knn_dists[int(len(knn_dists) * 0.9)]
             )
-            print(f"Auto-selected eps={epsilon:.4f}")
+            log(f"Auto-selected eps={epsilon:.4f}")
 
         dbscan = DBSCAN(eps=epsilon, min_samples=min_samples)
         cluster_labels = dbscan.fit_predict(all_emb)
         n_clusters = len(set(cluster_labels) - {-1})
         n_noise = (cluster_labels == -1).sum()
-        print(f"Finished fitting DBSCAN: {n_clusters} clusters, {n_noise} noise points")
+        log(f"Finished fitting DBSCAN: {n_clusters} clusters, {n_noise} noise points")
 
         if self.viz_clusters:
             pca = PCA(n_components=2)
@@ -184,14 +194,20 @@ class DiversitySampler:
         )
 
         closest_points = {}
-        for centroid, cluster_id in zip(centroids, unique_labels):
+        allocated = 0
+        for i, (cluster_id, centroid) in enumerate(enumerate(centroids)):
+            is_last = (i == len(centroids) - 1)
+            n = self._n_for_cluster(num_train, cluster_labels, cluster_id, allocated_so_far=allocated, is_last=is_last)
             distances = np.linalg.norm(all_emb - centroid, axis=1)
-            closest_indices = np.argsort(distances)[:self._n_for_cluster(num_train, cluster_labels, cluster_id)]
-            closest_points[cluster_id] = closest_indices
+            closest_points[cluster_id] = np.argsort(distances)[:n]
+            allocated += n
 
         return n_clusters, cluster_labels, centroids, closest_points
 
-    def run_hdbscan(self, all_emb, num_train, min_cluster_size=10, min_samples=None, save_path="./diversity"):
+    def run_hdbscan(self, all_emb, num_train, min_cluster_size=10, min_samples=None, save_path="./diversity", logger=None,):
+        log = logger.info if logger else print
+
+        log("Running HBDSCAN algorithm on training data")
         hdb = HDBSCAN(
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
@@ -201,7 +217,7 @@ class DiversitySampler:
 
         n_clusters = len(set(cluster_labels) - {-1})
         n_noise = (cluster_labels == -1).sum()
-        print(f"HDBSCAN: {n_clusters} clusters, {n_noise} noise points")
+        log(f"HDBSCAN: {n_clusters} clusters, {n_noise} noise points")
 
         if self.viz_clusters:
             pca = PCA(n_components=2)
@@ -224,10 +240,13 @@ class DiversitySampler:
         )
 
         closest_points = {}
-        for centroid, cluster_id in zip(centroids, unique_labels):
+        allocated = 0
+        for i, (cluster_id, centroid) in enumerate(enumerate(centroids)):
+            is_last = (i == len(centroids) - 1)
+            n = self._n_for_cluster(num_train, cluster_labels, cluster_id, allocated_so_far=allocated, is_last=is_last)
             distances = np.linalg.norm(all_emb - centroid, axis=1)
-            closest_indices = np.argsort(distances)[:self._n_for_cluster(num_train, cluster_labels, cluster_id)]
-            closest_points[cluster_id] = closest_indices
+            closest_points[cluster_id] = np.argsort(distances)[:n]
+            allocated += n
 
         return n_clusters, cluster_labels, centroids, closest_points
 
@@ -240,8 +259,11 @@ class DiversitySampler:
         n_components=64,
         k_max=50,
         min_k=2,
-        save_path="./diversity"
+        save_path="./diversity",
+        logger=None,
     ):
+        log = logger.info if logger else print
+
         if reduce_dims:
             n_comp = min(n_components, all_emb.shape[0] - 1, all_emb.shape[1])
             pca = PCA(n_components=n_comp)
@@ -259,7 +281,7 @@ class DiversitySampler:
 
                 knee_locator = KneeLocator(k_range, scores, curve="convex", direction="decreasing")
                 optimal_k = knee_locator.knee if knee_locator.knee is not None else 10
-                print("KMeans inertias:", dict(zip(k_range, scores)))
+                log("KMeans inertias:", dict(zip(k_range, scores)))
 
                 plt.figure(figsize=(8, 5))
                 plt.plot(list(k_range), scores, marker="o", linestyle="--")
@@ -274,7 +296,7 @@ class DiversitySampler:
                     scores.append(silhouette_score(all_emb, labels))
 
                 optimal_k = list(k_range)[int(np.argmax(scores))]
-                print("Silhouette scores:", dict(zip(k_range, scores)))
+                log("Silhouette scores:", dict(zip(k_range, scores)))
 
                 plt.figure(figsize=(8, 5))
                 plt.plot(list(k_range), scores, marker="o", linestyle="--")
@@ -291,7 +313,7 @@ class DiversitySampler:
             plt.savefig(f"{save_path}/optimal_k.png", bbox_inches='tight')
             plt.show()
             plt.close()
-            print(f"Optimal k: {optimal_k}")
+            log(f"Optimal k: {optimal_k}")
 
         else:
             optimal_k = self.optimize_clusters
@@ -311,9 +333,13 @@ class DiversitySampler:
 
         centroids = kmeans.cluster_centers_
         closest_points = {}
-        for cluster_id, centroid in enumerate(centroids):
+        allocated = 0
+        for i, (cluster_id, centroid) in enumerate(enumerate(centroids)):
+            is_last = (i == len(centroids) - 1)
+            n = self._n_for_cluster(num_train, cluster_labels, cluster_id, allocated_so_far=allocated, is_last=is_last)
             distances = np.linalg.norm(all_emb - centroid, axis=1)
-            closest_points[cluster_id] = np.argsort(distances)[:self._n_for_cluster(num_train, cluster_labels, cluster_id)]
+            closest_points[cluster_id] = np.argsort(distances)[:n]
+            allocated += n
 
         return n_clusters, cluster_labels, centroids, closest_points, all_emb
 
@@ -336,7 +362,19 @@ class DiversitySampler:
         return float(np.nanmean(D))
 
     # Visualization Plots for visualizing diversity sampling / comparing with random sampling
-    def plot_hausdorff_spread(self, full_n: np.ndarray, diverse_n: np.ndarray, random_n: np.ndarray | None, n_sampled: int, save_path: str = "./data_quality", save_plot: bool = False) -> None:
+    def plot_hausdorff_spread(
+        self, 
+        full_n: np.ndarray, 
+        diverse_n: np.ndarray, 
+        random_n: np.ndarray | None, 
+        n_sampled: int, 
+        save_path: str = "./data_quality", 
+        save_plot: bool = False,
+        logger=None,
+    ) -> None:
+
+        log = logger.info if logger else print
+        
         if save_plot:
             os.makedirs(save_path, exist_ok=True)
 
@@ -344,9 +382,9 @@ class DiversitySampler:
         hd_ran, mn_ran = self.calc_hausdorff_coverage(full_n, random_n)
         sp_div = self.calc_intra_spread(diverse_n)
         sp_ran = self.calc_intra_spread(random_n)
-        print(f"Hausdorff  — diverse: {hd_div:.4f}  |  random: {hd_ran:.4f}")
-        print(f"Mean NN    — diverse: {mn_div:.4f}  |  random: {mn_ran:.4f}")
-        print(f"Spread     — diverse: {sp_div:.4f}  |  random: {sp_ran:.4f}")
+        log(f"Hausdorff  — diverse: {hd_div:.4f}  |  random: {hd_ran:.4f}")
+        log(f"Mean NN    — diverse: {mn_div:.4f}  |  random: {mn_ran:.4f}")
+        log(f"Spread     — diverse: {sp_div:.4f}  |  random: {sp_ran:.4f}")
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         fig.suptitle(f"Diverse (n={n_sampled}) vs Random (n={n_sampled})", fontsize=13)
@@ -440,8 +478,8 @@ class DiversitySampler:
         ]:
             mask = np.ones(len(full_n), dtype=bool)
             mask[indices] = False
-            ax.scatter(emb_2d[mask, 0], emb_2d[mask, 1], s=4, alpha=0.4, color="steelblue", label="all frames")
-            ax.scatter(emb_2d[indices, 0], emb_2d[indices, 1], s=25, alpha=0.9, color="red", label=f"selected ({len(indices)})")
+            ax.scatter(emb_2d[mask, 0], emb_2d[mask, 1], s=6, alpha=0.5, color="steelblue", label="all frames", zorder=1)
+            ax.scatter(emb_2d[indices, 0], emb_2d[indices, 1], s=8, alpha=0.8, color="red", label=f"selected ({len(indices)})", zorder=2)   
             ax.set_title(title, fontsize=14)
             ax.set_xlabel("UMAP 1")
             ax.set_ylabel("UMAP 2")
@@ -452,7 +490,16 @@ class DiversitySampler:
         plt.close()
 
     # Evaluation Functions
-    def evaluate(self, data_arr, all_emb, cluster_labels, centroids, ssim_n=10, save_path="./diversity", save_plot=False) -> None:
+    def evaluate(self, 
+        data_arr, 
+        all_emb, 
+        cluster_labels, 
+        centroids, 
+        ssim_n=10, 
+        save_path="./diversity", 
+        save_plot=False,
+        logger=None,
+    ) -> None:
         """ 
         
         Evaluate clustering and diversity metrics including: 
@@ -463,6 +510,9 @@ class DiversitySampler:
             and SSIM between cluster representatives.
         
         """
+
+        log = logger.info if logger else print
+
         if save_plot:
             os.makedirs(save_path, exist_ok=True)
 
@@ -472,7 +522,7 @@ class DiversitySampler:
         db_score = davies_bouldin_score(
             all_emb[valid_mask], cluster_labels[valid_mask]
         )
-        print(f"Davies-Bouldin Index: {db_score:.4f} (lower is better)")
+        log(f"Davies-Bouldin Index: {db_score:.4f} (lower is better)")
 
         pca = PCA(n_components=2)
         pca_out = pca.fit_transform(all_emb[valid_mask])
@@ -520,7 +570,7 @@ class DiversitySampler:
             plt.show()
         else:
             centroid_pdist = None
-            print("Skipping centroid pairwise eval: fewer than 2 clusters")
+            log("Skipping centroid pairwise eval: fewer than 2 clusters")
 
         rep_frames = []
         for cid, centroid in zip(unique_labels, centroids):
@@ -646,7 +696,10 @@ class DiversitySampler:
         diverse_indices: np.ndarray = None,
         save_dir: str = "./comparison", # Sub-directory where data is stored and where evaluation plots will be saved
         save_plot: bool = False,
+        logger = None
     ) -> None:
+
+        log = logger.info if logger else print
 
         if save_plot:
             os.makedirs(save_dir, exist_ok=True)
@@ -681,7 +734,7 @@ class DiversitySampler:
 
         # Temporarily point save_path at the train sub-directory so plot
         # helpers write their PNGs in the right place.
-        self.plot_hausdorff_spread(all_emb, diverse_n, random_n, n_sampled, save_path=save_dir, save_plot=save_plot)
+        self.plot_hausdorff_spread(all_emb, diverse_n, random_n, n_sampled, save_path=save_dir, save_plot=save_plot, logger=logger)
         self.plot_nn_coverage(all_emb, diverse_n, random_n, save_path=save_dir, save_plot=save_plot)
         self.plot_pca_scatter(all_emb, diverse_n, random_n, save_path=save_dir, save_plot=save_plot)
         self.plot_umap(all_emb, diverse_indices, random_indices, save_path=save_dir, save_plot=save_plot)
@@ -722,7 +775,9 @@ class DiversitySampler:
         return isolation_distance, l_ratio
 
     # For each cluster, compute isolation distance and L-ratio, then identify outliers based on isolation distance distribution
-    def eval_iso(self, data_arr, all_emb, cluster_labels, centroids, include_outliers=True, save_path="./diversity", save_plot=False):
+    def eval_iso(self, data_arr, all_emb, cluster_labels, centroids, save_path="./diversity", save_plot=False, logger=None):
+        log = logger.info if logger else print
+
         if save_plot:
             os.makedirs(save_path, exist_ok=True)
 
@@ -737,15 +792,15 @@ class DiversitySampler:
         std = all_iso.std()
 
         outliers = np.abs(all_iso - mean) > 2 * std
-        indices = np.where(outliers)[0]
-        print(
+        outlier_indices = np.where(outliers)[0]
+        log(
             f"Detected {np.sum(outliers)} outlier clusters (possibly out of body or occluded/blurry frames)"
         )
-        print(f"Outlier cluster indices: {indices}")
+        log(f"Outlier cluster indices: {outlier_indices}")
 
         plt.bar(x=np.arange(len(all_iso)), height=all_iso)
         plt.xticks(np.arange(len(all_iso)), [str(l) for l in unique_labels])
-        plt.title(f"Cluster Iso Dist | Outliers={indices}")
+        plt.title(f"Cluster Iso Dist | Outliers={outlier_indices}")
         plt.savefig(f"{save_path}/cluster_iso_dist.png", bbox_inches='tight') if self.save_plots or save_plot else None
         plt.show()
         plt.close()
@@ -775,9 +830,11 @@ class DiversitySampler:
                     plt.close()
                 except ValueError:
                     print("Please enter a valid integer.")
+
+        return outlier_indices
     
     # Evaluate tightness of each cluster
-    def eval_tightness(self, all_emb, cluster_labels, centroids, save_path="./diversity", save_plot=False):
+    def eval_tightness(self, all_emb, cluster_labels, centroids, save_path="./diversity", save_plot=False,):
         if save_plot:
             os.makedirs(save_path, exist_ok=True)
 
@@ -803,11 +860,26 @@ class DiversitySampler:
         plt.show()
         plt.close()
 
+    # Helper function to recompute closest points based on manual / automatic cluster removing
+    def recompute_closest_points(self, emb, cluster_labels, centroids, num_samples):
+        remaining = [l for l in np.unique(cluster_labels) if l != -1]
+        closest_points = {}
+        allocated = 0
+        for i, (cid, centroid) in enumerate(zip(remaining, centroids)):
+            is_last = (i == len(remaining) - 1)
+            n = self._n_for_cluster(num_samples, cluster_labels, cid, allocated_so_far=allocated, is_last=is_last)
+            distances = np.linalg.norm(emb - centroid, axis=1)
+            closest_points[cid] = np.argsort(distances)[:n]
+            allocated += n
+        return closest_points
+
     # Allow user to manually filter clusters by changing k or specifying clusters to remove
-    def filter_clusters_manually(self, all_emb, num_train, cluster_labels, centroids, closest_points):
+    def filter_clusters_manually(self, all_emb, num_train, cluster_labels, centroids, closest_points, method=None, logger=None):
+        log = logger.info if logger else print
+
         unique_labels = [l for l in np.unique(cluster_labels) if l != -1]
         n_clusters = len(unique_labels)
-        print(f"\nCurrent clusters: {unique_labels}  (n={len(unique_labels)})")
+        log(f"\nCurrent clusters: {unique_labels}  (n={len(unique_labels)})")
 
         new_k = None
         while True:
@@ -832,10 +904,7 @@ class DiversitySampler:
             cluster_labels = kmeans.fit_predict(all_emb)
             centroids = kmeans.cluster_centers_
             n_clusters = new_k
-            closest_points = {}
-            for cluster_id, centroid in enumerate(centroids):
-                distances = np.linalg.norm(all_emb - centroid, axis=1)
-                closest_points[cluster_id] = np.argsort(distances)[:self._n_for_cluster(num_train, cluster_labels, cluster_id)]
+            closest_points = self.recompute_closest_points(all_emb, cluster_labels, centroids, num_train)
             unique_labels = list(range(new_k))
             print(f"  Done. New clusters: {unique_labels}")
 
@@ -856,16 +925,40 @@ class DiversitySampler:
             except ValueError:
                 print("  Enter integers separated by commas.")
 
+        # If removing cluster, recluster remaining samples
         if clusters_to_remove:
+            log(f"Chosen removed clusters: {clusters_to_remove}")
             for cid in clusters_to_remove:
                 closest_points.pop(cid, None)
                 cluster_labels[cluster_labels == cid] = -1
+
+            remove_mask = cluster_labels == -1
+            clean_emb = all_emb[~remove_mask]
+            original_indices = np.where(~remove_mask)[0]
             remaining = [l for l in np.unique(cluster_labels) if l != -1]
-            centroids = np.array(
-                [all_emb[cluster_labels == l].mean(axis=0) for l in remaining]
-            )
-            n_clusters = len(remaining)
-            print(f"Removed {clusters_to_remove}. Remaining clusters: {remaining}")
+            n_remaining = max(2, len(remaining))
+
+            if method in {"kmeans_sil", "kmeans_elbow"}:
+                opt_method = "silhouette" if method == "kmeans_sil" else "elbow"
+                _, cluster_labels_clean, centroids, closest_points, clean_emb = self.run_knn(
+                    all_emb=clean_emb,
+                    num_train=num_train,
+                    method=opt_method,
+                )
+            else:
+                kmeans = KMeans(n_clusters=n_remaining, random_state=0, n_init="auto")
+                cluster_labels_clean = kmeans.fit_predict(clean_emb)
+                centroids = kmeans.cluster_centers_
+                closest_points = self.recompute_closest_points(clean_emb, cluster_labels_clean, centroids, num_train)
+
+            closest_points = {
+                cid: original_indices[idxs]
+                for cid, idxs in closest_points.items()
+            }
+            all_emb = clean_emb
+            cluster_labels = cluster_labels_clean
+            n_clusters = n_remaining
+            log(f"Reclustered into {n_remaining} clusters after removal")
 
         return n_clusters, all_emb, cluster_labels, centroids, closest_points
 
@@ -973,9 +1066,9 @@ class DiversitySampler:
             _emb_model = emb_model or self.emb_model
             log(f"Computing embeddings using {_emb_model}...")
             if _emb_model == "dino":
-                all_emb = self.run_dino(data_arr)
+                all_emb = self.run_dino(data_arr, sample_logger)
             elif _emb_model == "openclip":
-                all_emb = self.run_openclip(data_arr)
+                all_emb = self.run_openclip(data_arr, sample_logger)
             else:
                 raise ValueError("Must specify a valid embedding model. Choose 'dino' or 'openclip'.")
         log(f"Embeddings computed: shape={all_emb.shape}")
@@ -993,14 +1086,14 @@ class DiversitySampler:
                             break
 
                         if raw == "elbow":
-                            filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(data_arr)
+                            filtered_data_arr, filtered_indexes, scores, thresh = fvi_filter(data_arr)
                             if len(filtered_data_arr) <= num_samples:
                                 log(
                                     f"FVI elbow kept only {len(filtered_data_arr)} frames (need {num_samples}) "
                                     f"— please choose a different method or threshold."
                                 )
                                 continue
-                            show_fvi_histogram(scores=scores, save_path=out_path)
+                            show_fvi_histogram(scores=scores, thresh=thresh, save_path=out_path)
                             data_arr = filtered_data_arr
                             if mask_arr is not None:
                                 mask_arr = mask_arr[filtered_indexes]
@@ -1015,8 +1108,8 @@ class DiversitySampler:
                                     if not 0 <= percentile <= 100:
                                         log("  Enter an integer between 0 and 100.")
                                         continue
-                                    filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
-                                        data_arr=data_arr, percentile=percentile, use_elbow=False
+                                    filtered_data_arr, filtered_indexes, scores, thresh = fvi_filter(
+                                        frames=data_arr, percentile=percentile, use_elbow=False
                                     )
                                     if len(filtered_data_arr) <= num_samples:
                                         log(
@@ -1025,7 +1118,7 @@ class DiversitySampler:
                                             f"— please enter a lower percentile."
                                         )
                                         continue
-                                    show_fvi_histogram(scores=scores, save_path=out_path)
+                                    show_fvi_histogram(scores=scores, thresh=thresh, save_path=out_path)
                                     data_arr = filtered_data_arr
                                     if mask_arr is not None:
                                         mask_arr = mask_arr[filtered_indexes]
@@ -1040,8 +1133,8 @@ class DiversitySampler:
                                 raw2 = input("Threshold (float): ").strip()
                                 try:
                                     thresh = float(raw2)
-                                    filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
-                                        data_arr=data_arr, thresh=thresh, use_elbow=False
+                                    filtered_data_arr, filtered_indexes, scores, thresh = fvi_filter(
+                                        frames=data_arr, thresh=thresh, use_elbow=False
                                     )
                                     if len(filtered_data_arr) <= num_samples:
                                         log(
@@ -1050,7 +1143,7 @@ class DiversitySampler:
                                             f"— please enter a lower threshold."
                                         )
                                         continue
-                                    show_fvi_histogram(scores=scores, save_path=out_path)
+                                    show_fvi_histogram(scores=scores, thresh=thresh, save_path=out_path)
                                     data_arr = filtered_data_arr
                                     if mask_arr is not None:
                                         mask_arr = mask_arr[filtered_indexes]
@@ -1068,23 +1161,24 @@ class DiversitySampler:
 
             else:
                 if use_filter == "fvi":
-                    filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
-                        data_arr=data_arr, use_elbow=True
+                    filtered_data_arr, filtered_indexes, scores, thresh = fvi_filter(
+                        frames=data_arr, use_elbow=True
                     )
 
                     if len(filtered_data_arr) < num_samples:
-                        keep_pct = (num_samples / original_num_frames) * 100
-                        auto_percentile = int((100 - keep_pct) / 2)
+                        buffer = 1.5  # Guarentees num_samples * buffer number of samples for clustering
+                        keep_pct = (num_samples * buffer / original_num_frames) * 100
+                        auto_percentile = int(100 - keep_pct)
                         auto_percentile = max(0, min(auto_percentile, 95))
                         log(
                             f"FVI elbow kept only {len(filtered_data_arr)} frames (need {num_samples}) "
                             f"— falling back to percentile={auto_percentile}"
                         )
                         filtered_data_arr, filtered_indexes, scores, _ = fvi_filter(
-                            data_arr=data_arr, percentile=auto_percentile, use_elbow=False
+                            frames=data_arr, percentile=auto_percentile, use_elbow=False
                         )
 
-                    show_fvi_histogram(scores=scores, save_path=out_path)
+                    show_fvi_histogram(scores=scores, thresh=thresh, save_path=out_path)
                     data_arr = filtered_data_arr
                     if mask_arr is not None:
                         mask_arr = mask_arr[filtered_indexes]
@@ -1106,21 +1200,21 @@ class DiversitySampler:
         log(f"Performing clustering using {_method}...")
         if _method == "hdbscan":
             n_clusters, cluster_labels, centroids, closest_points = self.run_hdbscan(
-                emb_for_clustering, num_samples, save_path=coverage_dir or out_path or "./diversity"
+                emb_for_clustering, num_samples, save_path=coverage_dir or out_path or "./diversity", logger=sample_logger,
             )
         elif _method == "dbscan":
             n_clusters, cluster_labels, centroids, closest_points = self.run_dbscan(
-                emb_for_clustering, num_samples
+                emb_for_clustering, num_samples, logger=sample_logger,
             )
         elif _method == "kmeans_elbow":
             n_clusters, cluster_labels, centroids, closest_points, emb_for_clustering = self.run_knn(
                 all_emb=emb_for_clustering, num_train=num_samples, method="elbow",
-                save_path=coverage_dir or out_path or "./diversity"
+                save_path=coverage_dir or out_path or "./diversity", logger=sample_logger,
             )
         elif _method == "kmeans_sil":
             n_clusters, cluster_labels, centroids, closest_points, emb_for_clustering = self.run_knn(
                 all_emb=emb_for_clustering, num_train=num_samples, method="silhouette",
-                save_path=coverage_dir or out_path or "./diversity"
+                save_path=coverage_dir or out_path or "./diversity", logger=sample_logger,
             )
         else:
             raise ValueError(
@@ -1132,19 +1226,20 @@ class DiversitySampler:
 
         if run_eval:
             log("Running dataset quality evaluation...")
-            self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
-                          centroids=centroids, include_outliers=True, save_path=coverage_dir, save_plot=save_data)
+            outlier_indices = self.eval_iso(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
+                          centroids=centroids, save_path=coverage_dir, save_plot=save_data, logger=sample_logger,)
             self.eval_tightness(all_emb=emb_for_clustering, cluster_labels=cluster_labels, centroids=centroids,
-                                save_path=coverage_dir, save_plot=save_data)
+                                save_path=coverage_dir, save_plot=save_data,)
             self.evaluate(data_arr=data_arr, all_emb=emb_for_clustering, cluster_labels=cluster_labels,
-                          centroids=centroids, ssim_n=ssim_n, save_path=coverage_dir, save_plot=save_data)
+                          centroids=centroids, ssim_n=ssim_n, save_path=coverage_dir, save_plot=save_data, logger=sample_logger,)
 
+            # If keep_interactive, allow user to manually remove clusters (potential outliers)
             if self.keep_interactive:
                 n_clusters, emb_for_clustering, cluster_labels, centroids, closest_points = self.filter_clusters_manually(
-                    emb_for_clustering, num_samples, cluster_labels, centroids, closest_points
+                    emb_for_clustering, num_samples, cluster_labels, centroids, closest_points, _method, sample_logger,
                 )
                 last_closest_points = closest_points
-                log(f"After manual filtering: {n_clusters} clusters remaining")
+                log(f"After manual filtering: {len([l for l in np.unique(cluster_labels) if l != -1])} clusters remaining")
 
         filtered_frames, all_indices = self.filter_frames(data_arr, last_closest_points)
         filtered_masks = mask_arr[all_indices] if mask_arr is not None else None
@@ -1173,17 +1268,23 @@ class DiversitySampler:
 
             metadata = {
                 "original_num_frames": original_num_frames,
-                "n_clusters": int(n_clusters),
-                "cluster_labels": [int(i) for i in cluster_labels],
                 "num_frames_selected": len(all_indices),
-                "all_indices": [int(i) for i in all_indices],
+                "n_clusters": int(n_clusters),
             }
             with open(os.path.join(out_path, "diversity_metadata.json"), "w") as f:
                 json.dump(metadata, f, indent=2)
             log(f"Saved diversity_metadata.json")
 
             if frame_metadata is not None:
-                index_map = {int(i): str(frame_metadata[i]) for i in all_indices}
+                index_map = {}
+                for cluster_id, idxs in last_closest_points.items():
+                    index_map[str(cluster_id)] = {
+                        str(pos): {
+                            "index": int(i),
+                            "frame_name": str(frame_metadata[i])
+                        }
+                        for pos, i in enumerate(idxs)
+                    }
                 with open(os.path.join(out_path, "index_to_frame.json"), "w") as f:
                     json.dump(index_map, f, indent=2)
                 log(f"Saved index_to_frame.json")

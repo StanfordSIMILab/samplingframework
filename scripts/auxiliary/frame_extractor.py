@@ -11,7 +11,7 @@ import cv2
 
 import matplotlib.pyplot as plt
 
-import fvi_computation as fvi_utils
+from . import fvi_computation as fvi_utils
 
 # Valid video file extensions, can be extended as needed
 VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv'}

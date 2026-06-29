@@ -98,36 +98,36 @@ def convert_to_coco(self, image_path, annotation_path, categories=None):
 # Utility function to convert selected frames to COCO format
 def convert_selected_frames_to_coco(self, selected_frames, output_file_path, categories=None):
     if categories is None:
-            # Default categories are derived from our Microvascular Decompression dataset,
-            # with IDs and names based on folder names in the original data structure
-            categories = [
-                {"id": 1, "name": "Cerebellum", "supercategory": "shape"},
-                {"id": 2, "name": "Arachnoid", "supercategory": "shape"},
-                {"id": 3, "name": "CN8", "supercategory": "shape"},
-                {"id": 4, "name": "CN5", "supercategory": "shape"},
-                {"id": 5, "name": "CN7", "supercategory": "shape"},
-                {"id": 6, "name": "CN_9_10_11", "supercategory": "shape"},
-                {"id": 7, "name": "SCA", "supercategory": "shape"},
-                {"id": 8, "name": "AICA", "supercategory": "shape"},
-                {"id": 9, "name": "SuperiorPetrosalVein", "supercategory": "shape"},
-                {"id": 10, "name": "Labrynthine", "supercategory": "shape"},
-                {"id": 11, "name": "Vein", "supercategory": "shape"},
-                {"id": 12, "name": "Brainstem", "supercategory": "shape"},
-                {"id": 1001, "name": "Suction", "supercategory": "shape"},
-                {"id": 1002, "name": "Bovie", "supercategory": "shape"},
-                {"id": 1003, "name": "Bipolar", "supercategory": "shape"},
-                {"id": 1004, "name": "Forcep", "supercategory": "shape"},
-                {"id": 1005, "name": "BluntProbe", "supercategory": "shape"},
-                {"id": 1006, "name": "Drill", "supercategory": "shape"},
-                {"id": 1007, "name": "Kerrison", "supercategory": "shape"},
-                {"id": 1008, "name": "Cottonoid", "supercategory": "shape"},
-                {"id": 1009, "name": "Scissors", "supercategory": "shape"},
-                {"id": 1012, "name": "Unknown", "supercategory": "shape"},
-                {"id": 1023, "name": "Dissector", "supercategory": ""},
-                {"id": 1024, "name": "Teflon", "supercategory": ""}
-            ]
-        else:
-            categories = categories
+        # Default categories are derived from our Microvascular Decompression dataset,
+        # with IDs and names based on folder names in the original data structure
+        categories = [
+            {"id": 1, "name": "Cerebellum", "supercategory": "shape"},
+            {"id": 2, "name": "Arachnoid", "supercategory": "shape"},
+            {"id": 3, "name": "CN8", "supercategory": "shape"},
+            {"id": 4, "name": "CN5", "supercategory": "shape"},
+            {"id": 5, "name": "CN7", "supercategory": "shape"},
+            {"id": 6, "name": "CN_9_10_11", "supercategory": "shape"},
+            {"id": 7, "name": "SCA", "supercategory": "shape"},
+            {"id": 8, "name": "AICA", "supercategory": "shape"},
+            {"id": 9, "name": "SuperiorPetrosalVein", "supercategory": "shape"},
+            {"id": 10, "name": "Labrynthine", "supercategory": "shape"},
+            {"id": 11, "name": "Vein", "supercategory": "shape"},
+            {"id": 12, "name": "Brainstem", "supercategory": "shape"},
+            {"id": 1001, "name": "Suction", "supercategory": "shape"},
+            {"id": 1002, "name": "Bovie", "supercategory": "shape"},
+            {"id": 1003, "name": "Bipolar", "supercategory": "shape"},
+            {"id": 1004, "name": "Forcep", "supercategory": "shape"},
+            {"id": 1005, "name": "BluntProbe", "supercategory": "shape"},
+            {"id": 1006, "name": "Drill", "supercategory": "shape"},
+            {"id": 1007, "name": "Kerrison", "supercategory": "shape"},
+            {"id": 1008, "name": "Cottonoid", "supercategory": "shape"},
+            {"id": 1009, "name": "Scissors", "supercategory": "shape"},
+            {"id": 1012, "name": "Unknown", "supercategory": "shape"},
+            {"id": 1023, "name": "Dissector", "supercategory": ""},
+            {"id": 1024, "name": "Teflon", "supercategory": ""}
+        ]
+    else:
+        categories = categories
 
     coco_annotations = []
     coco_images = []

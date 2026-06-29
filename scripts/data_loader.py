@@ -1,19 +1,20 @@
-# data_manager.py: Functions for loading and parsing datasets.
-
+# data_loader.py - Functions for loading and parsing datasets.
 import os
 import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from PIL import Image
+from tqdm import tqdm
 
-from auxiliary.convert_coco import convert_coco_to_png_masks
-from frame_extractor import load_video, process_video, process_videos, VIDEO_EXTENSIONS
+from auxiliary.coco_converter import convert_coco_to_png_masks
+from auxiliary.frame_extractor import load_video, process_video, process_videos, VIDEO_EXTENSIONS
 from auxiliary import pitvis_extractor
 
-
+# For loading the frames and masks for segmentation
 def load_frames_and_masks(
         data_folder: str | os.PathLike,
+        output_folder: str | Path | None = None,
         mask_type: str = "color_mask",
         target_size: tuple[int, int] | None = (224, 224),
         videos: list[str] | None = None,
@@ -26,7 +27,8 @@ def load_frames_and_masks(
     if not data_folder.exists():
         raise FileNotFoundError(f"Data folder not found: {data_folder}")
 
-    processed_dir = data_folder / "processed"
+    processed_dir = Path(output_folder) / "processed" if output_folder is not None else data_folder / "processed"
+
     if processed_dir.exists():
         print(f"Loading from existing processed directory: {processed_dir}")
         frames = np.load(processed_dir / "frames.npy")
@@ -41,7 +43,7 @@ def load_frames_and_masks(
 
     load_as_rgb = mask_type == "color_mask" or force_color_processing
     mask_mode = "RGB" if load_as_rgb else "L"
-    excluded = {"masks", "annotations", "mask", "processed", "split_data"}
+    excluded = {"masks", "annotations", "mask", "processed", "split_data", "outputs"}
 
     frame_paths = []
     frame_metadata = []
@@ -168,7 +170,7 @@ def load_frames_and_masks(
             continue
 
         frame_img = Image.open(frame_path).convert("RGB")
-        mask_img  = Image.open(mask_path)
+        mask_img  = Image.open(mask_path).convert(mask_mode)
 
         if target_size is not None:
             frame_img = frame_img.resize((w, h), Image.BILINEAR)
@@ -187,28 +189,49 @@ def load_frames_and_masks(
 
     color_map = {}
     if load_as_rgb:
+        print("Building color map...", flush=True)
         if global_color_map is None:
             flat = masks.reshape(-1, 3)
-            unique_colors = np.unique(flat, axis=0)
+            print(f"Finding unique colors (sampling from {flat.shape[0]} pixels)...", flush=True)
+            if len(flat) > 1_000_000:
+                rng = np.random.default_rng(42)
+                sample_idx = rng.choice(len(flat), size=1_000_000, replace=False)
+                sample = flat[sample_idx]
+            else:
+                sample = flat
+            unique_colors = np.unique(sample, axis=0)
+            print(f"Found {len(unique_colors)} unique colors, sorting...", flush=True)
             unique_colors = sorted(unique_colors, key=luminance)
             global_color_map = {
-                idx: list(color)
+                idx: [int(c) for c in color]
                 for idx, color in enumerate(unique_colors)
             }
+            print(f"Color map built with {len(global_color_map)} entries", flush=True)
 
         rgb_to_cls = {tuple(color): idx for idx, color in global_color_map.items()}
         N, H, W, _ = masks.shape
         flat = masks.reshape(-1, 3)
-        flat_out = np.zeros(flat.shape[0], dtype=np.uint16)
-        for rgb_tuple, cls in rgb_to_cls.items():
-            flat_out[np.all(flat == np.array(rgb_tuple), axis=1)] = cls
+        flat_out = np.zeros(flat.shape[0], dtype=np.uint8)
+        print(f"Mapping {len(rgb_to_cls)} colors to class indices across {flat.shape[0]} pixels...", flush=True)
+        flat_view = flat[:, 0].astype(np.uint32) * 65536 + flat[:, 1].astype(np.uint32) * 256 + flat[:, 2].astype(np.uint32)
+        for rgb_tuple, cls in tqdm(rgb_to_cls.items(), desc="Mapping colors to classes", total=len(rgb_to_cls)):
+            key = int(rgb_tuple[0]) * 65536 + int(rgb_tuple[1]) * 256 + int(rgb_tuple[2])
+            flat_out[flat_view == key] = cls
         masks = flat_out.reshape(N, H, W)
         color_map = global_color_map
-        print(f"Finished processing masks. Unique classes found: {len(color_map)}")
+        print(f"Finished processing masks. Unique classes found: {len(color_map)}", flush=True)
     else:
+        print("Processing grayscale masks...", flush=True)
         masks = masks.squeeze(-1)
+        print(f"Remapping {len(np.unique(masks))} unique values to contiguous indices...", flush=True)
         unique_vals = np.unique(masks)
-        print(f"Finished processing masks. Unique values found: {unique_vals}")
+        val_to_idx = {v: i for i, v in enumerate(unique_vals)}
+        remapped = np.zeros_like(masks, dtype=np.uint8)
+        for val, idx in tqdm(val_to_idx.items(), desc="Remapping mask values", total=len(val_to_idx)):
+            remapped[masks == val] = idx
+        masks = remapped
+        color_map = {i: int(v) for i, v in enumerate(unique_vals)}
+        print(f"Finished processing masks. Unique values remapped: {len(color_map)}", flush=True)
 
     frame_metadata = np.array(frame_metadata)
 
@@ -228,19 +251,25 @@ def load_frames_and_masks(
         print(f"Finished loading pitvis labels. Shape: {labels.shape}")
         return frames, masks, color_map, labels, frame_metadata
 
-    return frames, masks, color_map, frame_metadata
+    return frames, masks, color_map, frame_metadata, 
 
-
+# For if using phase classification / unannotated data, simply loads just the frames
 def load_frames_from_dir(
         data_folder: str | Path,
+        output_folder: str | Path | None = None,
         target_size: tuple[int, int] | None = None,
         exclude: set[str] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
 
     data_folder = Path(data_folder)
     excluded = exclude or {"masks", "annotations", "mask", "processed", "split_data"}
+    
+    # Set output folders
+    if output_folder is not None:
+        processed_dir = Path(output_folder) / "processed"
+    else:
+        processed_dir = data_folder / "processed"
 
-    processed_dir = data_folder / "processed"
     if (processed_dir / "frames.npy").exists():
         print(f"Loading from existing processed directory: {processed_dir}")
         frames = np.load(processed_dir / "frames.npy")
@@ -277,7 +306,7 @@ def load_frames_from_dir(
 
     return frames, frame_metadata
 
-
+# export the frames in proper format to out_folder
 def export_frames(
         frames: np.ndarray,
         out_folder: str | Path,
@@ -300,12 +329,12 @@ def export_frames(
         filename = f"{i:06d}_mask.png" if is_mask else f"{i:06d}.png"
         pil_img.save(out_folder / filename)
 
-
+# Helper function for differentiating colors in a color mask with no keys
 def luminance(rgb):
     r, g, b = rgb
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-
+# Helper function that uses the luminance functions to build a color map of class -> color
 def build_color_map(masks: np.ndarray, out_folder: Path | None) -> dict:
     flat = masks.reshape(-1, 3)
     unique_colors = np.unique(flat, axis=0)
@@ -317,7 +346,7 @@ def build_color_map(masks: np.ndarray, out_folder: Path | None) -> dict:
             json.dump({str(idx): color.tolist() for idx, color in enumerate(unique_colors)}, f, indent=2)
     return {idx: list(color) for idx, color in enumerate(unique_colors)}
 
-
+# convert the color into a class identity
 def apply_color_map(masks: np.ndarray, color_map: dict) -> np.ndarray:
     rgb_to_cls = {tuple(color): idx for idx, color in color_map.items()}
     N, H, W, _ = masks.shape

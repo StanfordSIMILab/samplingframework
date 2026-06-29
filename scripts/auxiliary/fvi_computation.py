@@ -1,8 +1,11 @@
 # fvi_computation.py: Frame Variation Index (FVI) computation and filtering utilities for pre-processing frames from mp4 videos.
+import os
+
 import numpy as np
-import pandas as pds
+import pandas as pd
 import seaborn as sns
 
+import matplotlib.pyplot as plt
 from scipy.stats import norm
 
 # Thresholding utilities for FVI filtering:
@@ -51,7 +54,7 @@ def compute_fvi(frames) -> np.ndarray:
     return np.array(fvi_scores)
 
 
-def fvi_filter(frames: np.ndarray, thresh: float = None, percentile: int = 90, use_elbow=True):
+def fvi_filter(frames: np.ndarray, thresh: float = None, percentile: int = 20, use_elbow=True):
     scores = compute_fvi(frames)
     if len(scores) == 0:
         return frames, np.arange(len(frames)), scores, thresh
@@ -59,7 +62,7 @@ def fvi_filter(frames: np.ndarray, thresh: float = None, percentile: int = 90, u
     if use_elbow and thresh is None:
         thresh = elbow_threshold(scores)
     elif thresh is None:
-        # Filter out the (100-percentile)% of frames with the lowest FVI scores by default
+        # Filter out the percentile% of frames with the lowest FVI scores by default
         thresh = np.percentile(scores, percentile)
 
     kept = [0]
@@ -71,78 +74,36 @@ def fvi_filter(frames: np.ndarray, thresh: float = None, percentile: int = 90, u
 
     return frames[kept], np.asarray(kept), scores, thresh
 
-def show_fvi_histogram(scores: np.ndarray, video_id: int = None, save_path: str = None) -> None:
-
+def show_fvi_histogram(scores: np.ndarray, thresh: float = None, save_path: str = None) -> None:
     if len(scores) == 0:
         return
 
     df = pd.DataFrame(scores, columns=["fvi"])
 
-    # Histogram
     sns.histplot(df, x="fvi", bins=20)
 
-    # Fit normal distribution
-    mu, std = norm.fit(df["fvi"])
+    if thresh is not None:
+        pct_kept = np.mean(scores > thresh) * 100
+        plt.axvline(thresh, color="red", linestyle="--", linewidth=2,
+                    label=f"Threshold = {thresh:.1f} ({pct_kept:.1f}% kept)")
 
-    # Bell curve
-    min_fvi = df["fvi"].min()
-    max_fvi = df["fvi"].max()
+    p25 = np.percentile(scores, 25)
+    p50 = np.percentile(scores, 50)
+    p75 = np.percentile(scores, 75)
 
-    x = np.linspace(min_fvi, max_fvi, 100)
-    y = norm.pdf(x, mu, std) * len(df) * (x[1] - x[0])
-
-    plt.plot(
-        x,
-        y,
-        "r--",
-        linewidth=2,
-        label="Normal fit"
-    )
-
-    # Mean and SD lines
-    plt.axvline(mu, color="blue", linestyle="--", label="Mean")
-
-    plt.axvline(
-        mu + std,
-        color="green",
-        linestyle="--",
-        label="Mean + 1 SD"
-    )
-    plt.axvline(
-        mu - std,
-        color="green",
-        linestyle="--",
-        label="Mean - 1 SD"
-    )
-
-    plt.axvline(
-        mu + 2 * std,
-        color="orange",
-        linestyle="--",
-        label="Mean + 2 SD"
-    )
-    plt.axvline(
-        mu - 2 * std,
-        color="orange",
-        linestyle="--",
-        label="Mean - 2 SD"
-    )
+    plt.axvline(p25, color="green", linestyle="--", label=f"25th percentile = {p25:.1f}")
+    plt.axvline(p50, color="blue", linestyle="--", label=f"Median = {p50:.1f}")
+    plt.axvline(p75, color="orange", linestyle="--", label=f"75th percentile = {p75:.1f}")
 
     plt.legend()
-
-    if video_id is not None:
-        plt.title(f"FVI distribution — video {video_id:02d}")
-    else:
-        plt.title("FVI distribution")
-
+    plt.title("FVI distribution")
     plt.xlabel("FVI")
     plt.ylabel("Count")
     plt.tight_layout()
 
     if save_path:
         os.makedirs(save_path, exist_ok=True)
-        plt.savefig(save_path, bbox_inches="tight")
+        plt.savefig(os.path.join(save_path, "fvi_histogram.png"), bbox_inches="tight")
     else:
         plt.show()
-
     plt.close()

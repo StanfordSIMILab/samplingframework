@@ -13,14 +13,15 @@ import yaml
 import logging
 
 from pathlib import Path
+import re
 
 import numpy as np
 import json
 import pandas as pd
 
 from diversity_sampler import DiversitySampler
-import data_manager as dm
-from auxiliary.data_partitioner import train_val_test_split, split_by_directory
+import data_loader as dm
+from data_partitioner import train_val_test_split, split_by_directory
 import eval_data as eval
 
 # Parse configuration yaml parameters
@@ -28,115 +29,128 @@ def load_config(config_path: str) -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
 
+# Check with directory has valid data to pass to evaluation function
+def has_valid_data(path: Path, style: str) -> bool:
+    if not path.is_dir():
+        return False
+    return (path / "frames.npy").exists()
+
 if __name__ == "__main__":
     """
     Full data_folder structure after running script:
     data_folder/
     ├── [raw input data]
-    ├── sampling_pipeline_data.txt       # pipeline logger — all steps, timestamps
-    ├── processed/
-    │   ├── frames.npy
-    │   ├── masks.npy                    # if annotated
-    │   ├── labels.npy                   # if pitvis
-    │   ├── color_map.json               # if annotated
-    │   ├── frame_metadata.json          # save the mappings of indexes to video/frame
-    │   └── frame_metadata.npy           # frame_metadata for downstream tasks
-    ├── split_data/
-    │   ├── color_map.json
-    │   ├── train/
-    │   │   ├── frames.npy
-    │   │   ├── masks.npy
-    │   │   ├── indices.npy
-    │   │   ├── frame_metadata.json      # save the mappings of indexes to video/frame
-    │   │   ├── frame_metadata.npy       # frame_metadata for downstream tasks
-    │   │   ├── diversity/
-    │   │   │   ├── frames.npy
-    │   │   │   ├── masks.npy
-    │   │   │   ├── frames/              # exported PNGs
-    │   │   │   ├── masks/               # exported PNGs
-    │   │   │   ├── all_embeddings.npy
-    │   │   │   ├── diverse_indices.npy
-    │   │   │   ├── index_to_frame.json  # save the mappings of indexes to video/frame
-    │   │   │   └── diversity_metadata.json
-    │   │   │   └── cluster_eval/
-    │   │   │       ├── cluster_vis.png
-    │   │   │       ├── cluster_iso_dist.png
-    │   │   │       ├── cluster_tightness_graph.png
-    │   │   │       ├── cluster_pairwise_ssim.png
-    │   │   │       ├── clusters_inner_dist.png
-    │   │   │       ├── centroid_pdist.png
-    │   │   │       ├── ssim_cluster_rep.png
-    │   │   │       ├── cluster_quality_score.png
-    │   │   │       └── optimal_k.png
-    │   │   └── random/
-    │   │       ├── frames.npy
-    │   │       ├── masks.npy
-    │   │       ├── random_indices.npy
-    │   │       └── index_to_frame.json  # save the mappings of indexes to video/frame
-    │   ├── val/                         # if val_prop > 0
-    │   │   ├── frames.npy
-    │   │   ├── masks.npy
-    │   │   ├── indices.npy
-    │   │   ├── frame_metadata.json      # save the mappings of indexes to video/frame
-    │   │   └── frame_metadata.npy       # frame_metadata for downstream tasks
-    │   └── test/
-    │       ├── frames.npy
-    │       ├── masks.npy
-    │       ├── indices.npy
-    │       ├── frame_metadata.json      # save the mappings of indexes to video/frame
-    │       └── frame_metadata.npy       # frame_metadata for downstream tasks
-    └── eval_outputs/                    # if div_eval=true
-        ├── evaluation_metrics.txt       # from eval logger
-        ├── training_comparison/         # compare how well did the model learn
-        │   ├── training_curves.png
-        │   ├── confusion_matrices.png
-        │   ├── per_class_f1.png
-        │   └── balanced_accuracy.png
-        └── data_coverage/               # compare how good was the sampling
-            ├── hausdorff_coverage_redundancy.png
-            ├── nn_coverage.png
-            ├── pca_coverage_heatmap.png
-            └── umap_selected.png
+    └── sampling_outputs/
+        ├── sampling_pipeline_data.txt       # pipeline logger — all steps, timestamps
+        ├── processed/
+        │   ├── frames.npy
+        │   ├── masks.npy                    # if annotated
+        │   ├── labels.npy                   # if pitvis
+        │   ├── color_map.json               # if annotated
+        │   ├── frame_metadata.json          # save the mappings of indexes to video/frame
+        │   └── frame_metadata.npy           # frame_metadata for downstream tasks
+        ├── split_data/
+        │   ├── color_map.json
+        │   ├── train/
+        │   │   ├── frames.npy
+        │   │   ├── masks.npy
+        │   │   ├── indices.npy
+        │   │   ├── frame_metadata.json      # save the mappings of indexes to video/frame
+        │   │   ├── frame_metadata.npy       # frame_metadata for downstream tasks
+        │   │   ├── diversity/
+        │   │   │   ├── frames.npy
+        │   │   │   ├── masks.npy
+        │   │   │   ├── frames/              # exported PNGs
+        │   │   │   ├── masks/               # exported PNGs
+        │   │   │   ├── all_embeddings.npy
+        │   │   │   ├── diverse_indices.npy
+        │   │   │   ├── index_to_frame.json  # save the mappings of indexes to video/frame
+        │   │   │   └── diversity_metadata.json
+        │   │   │   └── cluster_eval/
+        │   │   │       ├── cluster_vis.png
+        │   │   │       ├── cluster_iso_dist.png
+        │   │   │       ├── cluster_tightness_graph.png
+        │   │   │       ├── cluster_pairwise_ssim.png
+        │   │   │       ├── clusters_inner_dist.png
+        │   │   │       ├── centroid_pdist.png
+        │   │   │       ├── ssim_cluster_rep.png
+        │   │   │       ├── cluster_quality_score.png
+        │   │   │       └── optimal_k.png
+        │   │   └── random/
+        │   │       ├── frames.npy
+        │   │       ├── masks.npy
+        │   │       ├── random_indices.npy
+        │   │       └── index_to_frame.json  # save the mappings of indexes to video/frame
+        │   ├── val/                         # if val_prop > 0
+        │   │   ├── frames.npy
+        │   │   ├── masks.npy
+        │   │   ├── indices.npy
+        │   │   ├── frame_metadata.json      # save the mappings of indexes to video/frame
+        │   │   └── frame_metadata.npy       # frame_metadata for downstream tasks
+        │   └── test/
+        │       ├── frames.npy
+        │       ├── masks.npy
+        │       ├── indices.npy
+        │       ├── frame_metadata.json      # save the mappings of indexes to video/frame
+        │       └── frame_metadata.npy       # frame_metadata for downstream tasks
+        └── eval_outputs/                    # if div_eval=true
+            ├── evaluation_metrics.txt       # from eval logger
+            ├── training_comparison/         # compare how well did the model learn
+            │   ├── training_curves.png
+            │   ├── confusion_matrices.png
+            │   ├── per_class_f1.png
+            │   └── balanced_accuracy.png
+            └── data_coverage/               # compare how good was the sampling (div vs. random)
+                ├── hausdorff_coverage_redundancy.png
+                ├── nn_coverage.png
+                ├── pca_coverage_heatmap.png
+                └── umap_selected.png
     """
     # parser to allow user to use separate custom configurations
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configuration.yaml", type=str,
+    parser.add_argument("--config", default="./configs/configuration.yaml", type=str,
                         help="Path to configuration YAML file")
 
     # Determine and load correct configuration files
     args = parser.parse_args()
     cfg = load_config(args.config)
 
-    # Initialize parameters
+    # Initialize directory from cfg
     data_folder    = Path(cfg["data"]["data_dir"])
-    processed_dir  = data_folder / "processed"
-    split_data_dir = data_folder / "split_data"
+    output_folder  = data_folder / "sampling_outputs"
+    processed_dir  = output_folder / "processed"
+    split_data_dir = output_folder / "split_data"
+    output_folder.mkdir(parents=True, exist_ok=True)
+
     annotated      = cfg["data"]["annotated"]
     dataset_style  = cfg["data"]["dataset_style"]
 
+    # annotated data
     mask_type      = cfg["annotation"]["mask_type"]
     num_classes    = cfg["annotation"]["num_classes"]
     task_evaluation = cfg["annotation"]["task_evaluation"]
     labels_path    = cfg["annotation"].get("labels_path", None)
 
+    # Partioning
     skip_split     = cfg["partitioning"]["skip_split"]
     split_by_dir   = cfg["partitioning"]["split_by_dir"]
     test_prop      = cfg["partitioning"]["test_prop"]
     val_prop       = cfg["partitioning"]["val_prop"]
 
+    # Sampling
     num_train_samples = cfg["sampling"]["num_train_samples"]
     train_prop     = cfg["sampling"]["train_prop"]
     keep_interactive = cfg["sampling"]["keep_interactive"]
     use_filter = cfg["sampling"]["use_filter"]
-    filter_thresh = cfg["sampling"]["filter_thresh"]
 
+    # Evaluation random vs. diversity
     div_eval         = cfg["evaluation"]["div_eval"]
     model_name       = cfg["evaluation"]["model_name"]
     num_epochs       = cfg["evaluation"]["num_epochs"]
     batch_size       = cfg["evaluation"]["batch_size"]
 
     # Configure logger:
-    log_path = data_folder / "sampling_pipeline_log.txt"
+    log_path = output_folder / "sampling_pipeline_log.txt"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(message)s",
@@ -196,11 +210,12 @@ if __name__ == "__main__":
                 labels = None
                 masks = None
             
-        else:
+        elif task_evaluation == "segmentation":
             logger.info("Loading frames and masks for segmentation...")
             if annotated:
                 result = dm.load_frames_and_masks(
                     data_folder=data_folder,
+                    output_folder=output_folder,
                     mask_type=mask_type,
                     dataset_style=dataset_style,
                 )
@@ -213,6 +228,10 @@ if __name__ == "__main__":
                 frames, frame_metadata = dm.load_frames_from_dir(data_folder=data_folder)
                 masks = None
                 labels = None
+        else:
+            raise ValueError(
+                        "Please provide a correct task evaluation: 'phase classification' or 'segmentation'"
+                    )
 
     if labels_path is not None and labels is None:
         labels_df = pd.read_csv(labels_path)
@@ -224,11 +243,11 @@ if __name__ == "__main__":
     # Split data
     if split_by_dir:
         logger.info("Splitting by directory name...")
-        split_by_directory(data_folder=data_folder)
+        split_by_directory(data_folder=output_folder)
     elif not skip_split:
         logger.info("Performing random train/val/test split...")
         train_val_test_split(
-            data_folder=data_folder,
+            data_folder=output_folder,
             test_size=test_prop,
             val_size=val_prop,
         )
@@ -265,7 +284,6 @@ if __name__ == "__main__":
         num_samples=num_train_samples,
         run_eval=div_eval,
         use_filter=use_filter,
-        filter_thresh=filter_thresh,
         save_data=True,
         data_dir=str(diversity_out),
         frame_metadata=train_frame_metadata,
@@ -292,7 +310,8 @@ if __name__ == "__main__":
         logger.info("Running model training evaluation...")
 
         train_videos = None
-        val_video = None
+        val_videos = None
+        test_videos = None
 
         if dataset_style == "pitvis":
             train_videos = []
@@ -307,35 +326,99 @@ if __name__ == "__main__":
                     except ValueError:
                         print(f"Skipping non-integer value: {item!r}")
 
+            test_videos = []
+            logger.info("Enter video IDs to use for test (one or more per line, blank line to finish):")
             while True:
-                raw = input("Enter video ID to use for validation: ").strip()
-                try:
-                    val_video = int(raw)
+                raw = input().strip()
+                if raw == "":
                     break
-                except ValueError:
-                    print("Please enter a valid integer.")
+                for item in raw.split():
+                    try:
+                        test_videos.append(int(item))
+                    except ValueError:
+                        print(f"Skipping non-integer value: {item!r}")
+
+            # Find remaining videos and assign to validation (if any)
+            all_videos = sorted({
+                int(m.group(1))
+                for d in os.listdir(data_folder)
+                if os.path.isdir(os.path.join(data_folder, d))
+                for m in [re.search(r'(\d+)', d)]
+                if m
+            })
+            val_videos = [v for v in all_videos if v not in train_videos and v not in test_videos]
 
             logger.info(f"Training videos: {train_videos}")
-            logger.info(f"Validation video: {val_video}")
+            logger.info(f"Test video: {test_videos}")
+            logger.info(f"Remaining videos (if any) for validation: {val_videos}")
 
+        # Pass correct val/test root as none or not based on dataset_style
+        val_root_path  = split_data_dir / "val"
+        test_root_path = split_data_dir / "test"
+
+        val_root_valid  = has_valid_data(val_root_path,  dataset_style)
+        test_root_valid = has_valid_data(test_root_path, dataset_style)
+
+        # Load val/test frames if available:
+        val_frames_for_eval  = None
+        val_masks_for_eval   = None
+        test_frames_for_eval = None
+        test_masks_for_eval  = None
+
+        if val_root_valid:
+            val_frames_for_eval = np.load(val_root_path / "frames.npy")
+            val_masks_for_eval  = np.load(val_root_path / "masks.npy") if (val_root_path / "masks.npy").exists() else None
+
+        if test_root_valid:
+            test_frames_for_eval = np.load(test_root_path / "frames.npy")
+            test_masks_for_eval  = np.load(test_root_path / "masks.npy") if (test_root_path / "masks.npy").exists() else None
+        
+        # Make sure there are embeddings
+        all_emb_path = os.path.join(div_out_path, "all_embeddings.npy") if div_out_path is not None else None
+        
+        # Make sure color_map is passed if available
+        color_map_path = split_data_dir / "color_map.json"
+        color_map_for_eval = None
+        if color_map_path.exists():
+            with open(color_map_path) as f:
+                color_map_for_eval = {int(k): v for k, v in json.load(f).items()}
+
+        # Make sure to set num_classes if not already set
+        if num_classes is None and color_map_for_eval is not None:
+            num_classes = len(color_map_for_eval)
+
+        # Provide training data:
+        train_indices_path = split_data_dir / "train" / "indices.npy"
+        train_indices = np.load(train_indices_path) if train_indices_path.exists() else None
+        all_labels_for_eval = labels[train_indices] if labels is not None and train_indices is not None else labels
         eval.main(
             task=task_evaluation,
             dataset_root=str(data_folder),
             dataset_style=dataset_style,
+            train_root=str(split_data_dir / "train") if dataset_style != "pitvis" else None,
+            val_root=str(val_root_path)   if val_root_valid  else None,
+            test_root=str(test_root_path) if test_root_valid else None,
             train_videos=train_videos,
-            val_video=val_video,
-            output_dir=str(data_folder / "eval_outputs"),
+            val_videos=val_videos,
+            test_videos=test_videos,
+            output_dir=str(output_folder / "eval_outputs"),
             model_name=model_name,
             num_classes=num_classes,
             num_epochs=num_epochs,
-            batch_size = batch_size,
+            batch_size=batch_size,
+            all_emb=np.load(all_emb_path) if all_emb_path is not None and os.path.exists(all_emb_path) else None,
             div_frames=div_frames,
             div_masks=div_masks,
             div_indices=np.array(div_indices),
             rand_frames=train_frames[random_indices],
             rand_masks=train_masks[random_indices] if train_masks is not None else None,
             rand_indices=random_indices,
-            all_emb=np.load(os.path.join(div_out_path, "all_embeddings.npy")),
+            val_frames=val_frames_for_eval,
+            val_masks=val_masks_for_eval,
+            test_frames=test_frames_for_eval,
+            test_masks=test_masks_for_eval,
+            color_map=color_map_for_eval,
+            all_labels_train=labels[train_indices] if labels is not None and train_indices is not None else labels,
         )
 
     logger.info("Done!")
