@@ -77,13 +77,76 @@ def train_val_test_split(
                         for pos, i in enumerate(sorted(idx))
                     }, f, indent=2)
 
-    if (processed_dir / "color_map.json").exists():
-        shutil.copy(processed_dir / "color_map.json", split_data_dir / "color_map.json")
+    # Copy the metadata files to the split_data directory for reference
+    for meta_file in ("color_map.json", "phase_classes.json", "instrument_classes.json"):
+        src = processed_dir / meta_file
+        if src.exists():
+            shutil.copy(src, split_data_dir / meta_file)
 
     print(f"\nSplit summary: train={len(train_idx)}  val={len(val_idx)}  test={len(test_idx)}")
     print(f"Saved splits to {split_data_dir}")
 
     return train_idx, val_idx, test_idx
+
+# split dataset by video IDs (for pitvis/video datasets) into train/val/test npy files
+def split_by_video_ids(
+    output_folder: Path,
+    train_videos: list,
+    val_videos: list,
+    test_videos: list,
+    frames: np.ndarray,
+    masks: np.ndarray | None = None,
+    labels: np.ndarray | None = None,
+    frame_metadata: np.ndarray | None = None,
+):
+    split_dir = output_folder / "split_data"
+
+    if frame_metadata is None:
+        raise ValueError("frame_metadata required for split_by_video_ids.")
+
+    def extract_video_id(metadata_str: str) -> int | None:
+        parts = str(metadata_str).rsplit("_", 1)
+        if len(parts) < 2:
+            return None
+        stem = parts[0]
+        matches = re.findall(r'\d+', stem)
+        return int(matches[-1]) if matches else None
+
+    meta_video_ids = np.array([extract_video_id(m) for m in frame_metadata])
+
+    for split_name, video_ids in [
+        ("train", train_videos),
+        ("val",   val_videos),
+        ("test",  test_videos),
+    ]:
+        if not video_ids:
+            continue
+
+        out_dir = split_dir / split_name
+        if out_dir.exists() and (out_dir / "frames.npy").exists():
+            print(f"Found existing {split_name} split — skipping...")
+            continue
+
+        indices = np.where(np.isin(meta_video_ids, [int(v) for v in video_ids]))[0]
+
+        if len(indices) == 0:
+            print(f"Warning: no frames found for {split_name} videos {video_ids}")
+            continue
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        np.save(out_dir / "frames.npy",        frames[indices])
+        np.save(out_dir / "indices.npy",        indices)
+        np.save(out_dir / "frame_metadata.npy", frame_metadata[indices])
+
+        if masks is not None:
+            np.save(out_dir / "masks.npy", masks[indices])
+        if labels is not None:
+            np.save(out_dir / "labels.npy", labels[indices])
+
+        with open(out_dir / "frame_metadata.json", "w") as f:
+            json.dump({str(i): str(m) for i, m in enumerate(frame_metadata[indices])}, f, indent=2)
+
+        print(f"Saved {split_name} split: {len(indices)} frames -> {out_dir}")
 
 # If any folder / frame names contain words like train/val(idation)/test, split on these naming conventions
 def split_by_directory(
@@ -146,8 +209,11 @@ def split_by_directory(
                     for pos, i in enumerate(sorted(idx))
                 }, f, indent=2)
 
-    if (processed_dir / "color_map.json").exists():
-        shutil.copy(processed_dir / "color_map.json", split_data_dir / "color_map.json")
+    # Copy the metadata files to the split_data directory for reference
+    for meta_file in ("color_map.json", "phase_classes.json", "instrument_classes.json"):
+        src = processed_dir / meta_file
+        if src.exists():
+            shutil.copy(src, split_data_dir / meta_file)
 
     print(f"Saved directory-inferred splits to {split_data_dir}")
     for split_name, idx_list in split_indices.items():

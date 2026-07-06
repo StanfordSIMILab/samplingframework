@@ -1,24 +1,31 @@
 # data_loader.py - Functions for loading and parsing datasets.
 import os
-import json
-import numpy as np
-import pandas as pd
-from pathlib import Path
-from PIL import Image
 from tqdm import tqdm
 
+from pathlib import Path
+import json
+import re
+
+import numpy as np
+import pandas as pd
+
+import cv2
+from PIL import Image
+
 from auxiliary.coco_converter import convert_coco_to_png_masks
-from auxiliary.frame_extractor import load_video, process_video, process_videos, VIDEO_EXTENSIONS
+from auxiliary.frame_extractor import extract_video_frames, extract_frames_with_filtering, process_video, process_videos, VIDEO_EXTENSIONS
 from auxiliary import pitvis_extractor
 
 # For loading the frames and masks for segmentation
 def load_frames_and_masks(
         data_folder: str | os.PathLike,
         output_folder: str | Path | None = None,
+        dataset_style: str = "cholec",
         mask_type: str = "color_mask",
         target_size: tuple[int, int] | None = (224, 224),
         videos: list[str] | None = None,
-        dataset_style: str = "cholec",
+        videos_fps: int = 5, # When loading non-pitvis video data, sample at this framerate
+        filtering: str | None = None,
         force_color_processing: bool = False,
         global_color_map: dict | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -32,10 +39,12 @@ def load_frames_and_masks(
     if processed_dir.exists():
         print(f"Loading from existing processed directory: {processed_dir}")
         frames = np.load(processed_dir / "frames.npy")
-        masks  = np.load(processed_dir / "masks.npy")
+        masks = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
         frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
-        with open(processed_dir / "color_map.json") as f:
-            color_map = {int(k): v for k, v in json.load(f).items()}
+        color_map = {}
+        if (processed_dir / "color_map.json").exists():
+            with open(processed_dir / "color_map.json") as f:
+                color_map = {int(k): v for k, v in json.load(f).items()}
         if (processed_dir / "labels.npy").exists():
             labels = np.load(processed_dir / "labels.npy", allow_pickle=True)
             return frames, masks, color_map, labels, frame_metadata
@@ -67,6 +76,108 @@ def load_frames_and_masks(
                             frame_paths.append(f)
                             frame_metadata.append(f"{video_dir.name}_{f.stem}")
 
+    elif dataset_style == "pitvis":
+        video_ids = (
+            [int(v) for v in videos]
+            if videos is not None
+            else sorted(
+                int(d.name)
+                for d in data_folder.iterdir()
+                if d.is_dir() and d.name.isdigit()
+            )
+        )
+        if not video_ids:
+            video_ids = sorted(
+                int(m.group(1))
+                for f in data_folder.glob("*")
+                if any(f.suffix.lower() == ext for ext in VIDEO_EXTENSIONS)
+                for m in [re.search(r'(\d+)', f.stem)]
+                if m
+            )
+        if not video_ids:
+            raise FileNotFoundError(f"No numbered video folders or video files found under {data_folder}")
+
+        pitvis_extractor.extract_pitvis_frames(data_folder, video_ids)
+        annot_index = pitvis_extractor.load_pitvis_annotations(data_folder, video_ids)
+
+        pitvis_meta = []
+        for vid_id in video_ids:
+            vid_dir = data_folder / f"{vid_id:02d}"
+            print(f"Scanning {vid_dir.name}...")
+            for f in sorted(vid_dir.rglob("*")):
+                if any(exc in part for part in f.parts for exc in excluded):
+                    continue
+                if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    frame_paths.append(f)
+                    pitvis_meta.append((vid_id, int(f.stem)))
+                    frame_metadata.append(f"video_{vid_id:02d}_{f.stem}")
+
+        if not frame_paths:
+            raise FileNotFoundError(f"No image frames found under {data_folder} for pitvis")
+
+        print(f"Found {len(frame_paths)} frames.")
+
+        if target_size is not None:
+            h, w = target_size
+        else:
+            h, w = Image.open(frame_paths[0]).size[::-1]
+
+        n = len(frame_paths)
+        frames = np.empty((n, h, w, 3), dtype=np.uint8)
+
+        for i, frame_path in enumerate(frame_paths):
+            print(f"Loading frame {i+1}/{n}", end="\r", flush=True)
+            frame_img = Image.open(frame_path).convert("RGB")
+            if target_size is not None:
+                frame_img = frame_img.resize((w, h), Image.BILINEAR)
+            frames[i] = np.array(frame_img, dtype=np.uint8)
+
+        print(f"\nFinished loading {n} frames.")
+
+        frame_metadata = np.array(frame_metadata)
+        labels = pitvis_extractor.get_pitvis_labels(annot_index, pitvis_meta)
+
+        # Load phase mapping and save to JSON for future reference
+        class_names_by_raw_label, phase_num_classes, phase_unlabeled_name = pitvis_extractor.load_pitvis_phase_map(
+            data_folder / "map_steps.csv"
+        )
+
+        # Load instrument mapping and save to JSON for future reference
+        inst_class_names_by_raw_label, inst_num_classes, inst_negative_names_by_raw_label = pitvis_extractor.load_pitvis_instrument_map(
+            data_folder / "map_instruments.csv"
+        )
+
+        # Save the processed data to disk for future use
+        processed_dir.mkdir(parents=True, exist_ok=True)  # moved up — phase_classes.json needs this dir to exist
+        np.save(processed_dir / "frames.npy", frames)
+        np.save(processed_dir / "labels.npy", labels)          # raw labels: -1 and 1..14, unshifted
+        np.save(processed_dir / "frame_metadata.npy", frame_metadata)
+        
+        # Save the frame metadata and class mappings to JSON files for future reference
+        with open(processed_dir / "frame_metadata.json", "w") as f:
+            json.dump({str(i): str(m) for i, m in enumerate(frame_metadata)}, f, indent=2)
+
+        with open(processed_dir / "phase_classes.json", "w") as f:
+            json.dump({
+                "num_classes": phase_num_classes,
+                "class_names_by_raw_label": {str(k): v for k, v in class_names_by_raw_label.items()},
+                "unlabeled_name": phase_unlabeled_name,
+            }, f, indent=2)
+
+        with open(processed_dir / "instrument_classes.json", "w") as f:
+            json.dump({
+                "num_classes": inst_num_classes,
+                "class_names_by_raw_label": {str(k): v for k, v in inst_class_names_by_raw_label.items()},
+                "negative_names_by_raw_label": {str(k): v for k, v in inst_negative_names_by_raw_label.items()},
+            }, f, indent=2)
+
+        masks = None # no masks for pitvis
+        color_map = {} # no color map for pitvis
+
+        print(f"Saved processed pitvis data to {processed_dir}")
+        print(f"Finished loading pitvis labels. Shape: {labels.shape}")
+        return frames, masks, color_map, labels, frame_metadata
+
     elif dataset_style == "flat":
         for f in sorted(data_folder.iterdir()):
             if any(exc in part for part in f.parts for exc in excluded):
@@ -92,36 +203,32 @@ def load_frames_and_masks(
                     frame_paths.append(f)
                     frame_metadata.append(f"{subdir.name}_{f.stem}")
 
-    elif dataset_style == "pitvis":
-        video_ids = (
-            [int(v) for v in videos]
-            if videos is not None
-            else sorted(
-                int(d.name)
-                for d in data_folder.iterdir()
-                if d.is_dir() and d.name.isdigit()
-            )
+    elif dataset_style == "video":
+        video_files = sorted(
+            f for f in data_folder.glob("*")
+            if any(f.suffix.lower() == ext for ext in VIDEO_EXTENSIONS)
+            and (videos is None or f.stem in videos)
         )
-        if not video_ids:
-            raise FileNotFoundError(f"No numbered video folders found under {data_folder}")
+        if not video_files:
+            raise FileNotFoundError(f"No video files found under {data_folder}")
 
-        annot_index = pitvis_extractor.load_pitvis_annotations(data_folder, video_ids)
-
-        pitvis_meta = []
-        for vid_id in video_ids:
-            vid_dir = data_folder / f"{vid_id:02d}"
-            print(f"Scanning {vid_dir.name}...")
-            for f in sorted(vid_dir.rglob("*")):
-                if any(exc in part for part in f.parts for exc in excluded):
-                    continue
-                if f.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                    frame_paths.append(f)
-                    pitvis_meta.append((vid_id, int(f.stem)))
-                    frame_metadata.append(f"video_{vid_id:02d}_{f.stem}")
+        for video_path in video_files:
+            stem = video_path.stem
+            out_dir = data_folder / stem
+            if not out_dir.exists() or not any(out_dir.iterdir()):
+                extract_frames_with_filtering(
+                    video_path=str(video_path),
+                    output_dir=str(out_dir),
+                    filtering=filtering,
+                    num_samples=None,
+                )
+            for f in sorted(out_dir.glob("*.jpg")):
+                frame_paths.append(f)
+                frame_metadata.append(f"{stem}_{f.stem}")
 
     else:
         raise ValueError(
-            f"Unknown dataset_style '{dataset_style}'. Choose 'cholec', 'flat', 'nested', or 'pitvis'."
+            f"Unknown dataset_style '{dataset_style}'. Choose 'cholec', 'pitvis', 'flat', 'nested', or 'video'."
         )
 
     if not frame_paths:
@@ -245,12 +352,6 @@ def load_frames_and_masks(
         json.dump({str(k): v for k, v in color_map.items()}, f, indent=2)
     print(f"Saved processed data to {processed_dir}")
 
-    if dataset_style == "pitvis":
-        labels = pitvis_extractor.get_pitvis_labels(annot_index, pitvis_meta)
-        np.save(processed_dir / "labels.npy", labels)
-        print(f"Finished loading pitvis labels. Shape: {labels.shape}")
-        return frames, masks, color_map, labels, frame_metadata
-
     return frames, masks, color_map, frame_metadata, 
 
 # For if using phase classification / unannotated data, simply loads just the frames
@@ -259,6 +360,10 @@ def load_frames_from_dir(
         output_folder: str | Path | None = None,
         target_size: tuple[int, int] | None = None,
         exclude: set[str] | None = None,
+        dataset_style: str = "flat",
+        videos: list[str] | None = None,
+        videos_fps: float = 1.0,
+        filtering: str | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
 
     data_folder = Path(data_folder)
@@ -275,6 +380,25 @@ def load_frames_from_dir(
         frames = np.load(processed_dir / "frames.npy")
         frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
         return frames, frame_metadata
+
+    if dataset_style == "video":
+        video_files = sorted(
+            f for f in data_folder.glob("*")
+            if any(f.suffix.lower() == ext for ext in VIDEO_EXTENSIONS)
+            and (videos is None or f.stem in videos)
+        )
+        if not video_files:
+            raise FileNotFoundError(f"No video files found under {data_folder}")
+        for video_path in video_files:
+            stem = video_path.stem
+            out_dir = data_folder / stem
+            if not out_dir.exists() or not any(out_dir.glob("*.jpg")):
+                extract_frames_with_filtering(
+                    video_path=str(video_path),
+                    output_dir=str(out_dir),
+                    filtering=filtering,
+                    num_samples=None,
+                )
 
     frames_list = []
     frame_metadata = []

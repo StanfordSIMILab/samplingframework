@@ -3,14 +3,23 @@
 
 # Load Dataset Parameters:
 data:
-  data_dir: "/mnt/sda1/nishanr/Diversity_Sampling/Cholec8K"
+  data_dir: "/path/to/your/data/directory"
   annotated: True                 # Determine whether diversity sampling annotated vs. unannotated data
-  dataset_style: "cholec"         # 'cholec', 'pitvis', 'flat', or 'nested' *more info at bottom
+  dataset_style: "cholec"         # 'cholec', 'pitvis', 'flat', 'nested' or 'video' *more info at bottom
+  videos_fps: 5.0                 # Custom fps for sampling frames from dataset of videos (unless its pitvis)
+  filtering: null                 # optional filter before div sampling: 'fvi' or null
 
+# For video and pitvis datasets (ignore otherwise)
+video:
+  choose_videos: false            # allow users to select videos for each split interactively
+  train_videos: [2, 3, 4, 5, 6]   # id numbers for videos for training
+  val_videos: [1]                 # id numbers for videos for validation
+  test_videos: [12]               # id numbers for videos for test
+  
 # If annotated is True, allow user to choose task / set-up
 annotation:
   task_evaluation: "segmentation" # 'segmentation' or 'phase_classification'
-  mask_type: "color_mask"         # if segmentation: 'color_mask', 'mask', or 'watershed_mask'
+  mask_type: "color_mask"         # if segmentation: 'color_mask' or 'mask' **more info at bottom
   num_classes: null               # null to infer from dataset
   labels_path: null               # optional: path to CSV for non-pitvis phase classification
 
@@ -19,23 +28,52 @@ partitioning:
   skip_split: false              # Toggle whether to partion data or not
   split_by_dir: true             # if folder/file names contain key words like train/val(idation)/test, split by name
   test_prop: 0.1                 # ignored if split_by_dir=true
-  val_prop: 0.0                  # ignored if split_by_dir=true, 0.0 to skip validation split
+  val_prop: 0.1                  # ignored if split_by_dir=true, 0.0 to skip validation split
 
 # Specific parameters for diversity sampling
-sampling:
+diversity_sampling:
   num_train_samples: 1000        # total number of samples (set to null to prioritize train_prop)
-  train_prop: 0.1                # proportion of train frames to select
+  train_prop: 0.1                # proportion of train frames to select (num_train_samples will take priority if not null)
+  emb_model: 'openclip'          # Embedding model to use for diversity sampling: 'openclip', 'resnet50', or 'resnet18'
+  method: 'kmeans_sil'           # Clustering method to use: 'hbdscan', 'dbscan', 'kmeans_elbow', or 'kmeans_sil'
+  reduce_dims: true              # set true to use PCA to reduce embedding dimensions before clustering
+  n_components: 64               # if reduce_dims = true, then reduce to n_components dimensions
+  spread_sampling: true          # set true to sample points broadly throughout cluster instead of the points closest to cluster center
   keep_interactive: false        # Allow you to choose fvi filtering threshold and manually remove/recluster for diversity sampling
-  use_filter: fvi                # optional filter before div sampling: 'fvi'
 
 # Specific parameters for evaluating diversity / random on training model
 evaluation:
-  div_eval: true                 # Toggle on full random vs. diverse evaluation / training
-  model_name: 'segformer'      # only if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
+  evaluate_data: true            # Toggle on full random vs. diverse evaluation / training
+  model_name: 'segformer'        # only if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
   num_epochs: 30                 # number of epochs to train model on segmentation vs. phase classification
   batch_size: 1                  # use batch_size=1 for SGD-style convergence tracking
+  efficiency_curve: true         # train model on increasing sample sizes to visualize diversity vs. random efficiency
+  sample_sizes: [10, 50, 100, 200, 300, 500, 750, 1000] # sample sizes evaluated for efficiency curve (ignored if efficiency_curve=false)
 
-# *Different Dataset Structures supported*
+# * Different Dataset Structures supported:
+# 'cholec'
+# data_folder/
+# ├── video_01/
+# │   ├── sample_001/
+# │   │   ├── frame_00001.jpg
+# │   │   └── frame_00001_mask.png
+# │   └── sample_002/
+# │       └── ...
+# └── ...
+
+# 'pitvis'
+# data_folder/
+# ├── video_01.mp4
+# ├── 01/
+# │   ├── 00000.jpg
+# │   ├── 00125.jpg
+# │   └── ...
+# ├── video_02.mp4
+# ├── 02/
+# │   └── ...
+# ├── ...
+# └── map_steps.csv
+
 # 'flat':
 # data_folder/
 # ├── frame_00001.jpg
@@ -55,22 +93,22 @@ evaluation:
 # │   └── ...
 # └── ...
 
-# 'cholec'
+# 'video'
 # data_folder/
-# ├── video_01/
-# │   ├── sample_001/
-# │   │   ├── frame_00001.jpg
-# │   │   └── frame_00001_mask.png
-# │   └── sample_002/
-# │       └── ...
-# └── ...
-
-# 'pitvis'
-# data_folder/
+# ├── video_01.mp4
 # ├── 01/
 # │   ├── 00000.jpg
+# │   ├── 00000_mask.jpg
 # │   ├── 00125.jpg
+# │   ├── 00125_mask.jpg
 # │   └── ...
+# ├── video_02.mp4
 # ├── 02/
 # │   └── ...
-# └── map_steps.csv
+# └── ...
+
+# ** mask_type options:
+# 'color_mask' — RGB color-coded masks (H x W x 3), class determined by color
+#                e.g. Cholec8K, most publicly available surgical datasets
+# 'mask'       — Grayscale integer masks (H x W x 1), pixel value = class ID
+#                e.g. custom annotated datasets, COCO-style exports (produced by auxiliary.coco_converter)

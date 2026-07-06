@@ -21,8 +21,8 @@ import pandas as pd
 
 from diversity_sampler import DiversitySampler
 import data_loader as dm
-from data_partitioner import train_val_test_split, split_by_directory
-import eval_data as eval
+from data_partitioner import train_val_test_split, split_by_directory, split_by_video_ids
+import eval_data as ev
 
 # Parse configuration yaml parameters
 def load_config(config_path: str) -> dict:
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         │       ├── indices.npy
         │       ├── frame_metadata.json      # save the mappings of indexes to video/frame
         │       └── frame_metadata.npy       # frame_metadata for downstream tasks
-        └── eval_outputs/                    # if div_eval=true
+        └── eval_outputs/                    # if evaluate_data=true
             ├── evaluation_metrics.txt       # from eval logger
             ├── training_comparison/         # compare how well did the model learn
             │   ├── training_curves.png
@@ -122,32 +122,53 @@ if __name__ == "__main__":
     split_data_dir = output_folder / "split_data"
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    annotated      = cfg["data"]["annotated"]
-    dataset_style  = cfg["data"]["dataset_style"]
+    # Data loading configurations
+    annotated     = cfg["data"]["annotated"]
+    filtering     = cfg["data"]["filtering"]
+    dataset_style = cfg["data"]["dataset_style"]
+    videos_fps    = cfg["data"].get("videos_fps", 1.0) # if raw data are mp4s
+
+    # video/pitvis specific parameters
+    if dataset_style in {"pitvis", "video"}:
+        choose_videos = cfg["video"].get("choose_videos", False)
+        train_videos  = cfg["video"].get("train_videos", []) or []
+        val_videos    = cfg["video"].get("val_videos", []) or []
+        test_videos   = cfg["video"].get("test_videos", []) or []
+    else:
+        choose_videos = False
+        train_videos  = None
+        val_videos    = None
+        test_videos   = None
 
     # annotated data
-    mask_type      = cfg["annotation"]["mask_type"]
-    num_classes    = cfg["annotation"]["num_classes"]
+    mask_type       = cfg["annotation"]["mask_type"]
+    num_classes     = cfg["annotation"]["num_classes"]
     task_evaluation = cfg["annotation"]["task_evaluation"]
-    labels_path    = cfg["annotation"].get("labels_path", None)
+    labels_path     = cfg["annotation"].get("labels_path", None)
 
     # Partioning
-    skip_split     = cfg["partitioning"]["skip_split"]
-    split_by_dir   = cfg["partitioning"]["split_by_dir"]
-    test_prop      = cfg["partitioning"]["test_prop"]
-    val_prop       = cfg["partitioning"]["val_prop"]
+    skip_split   = cfg["partitioning"]["skip_split"]
+    split_by_dir = cfg["partitioning"]["split_by_dir"]
+    test_prop    = cfg["partitioning"]["test_prop"]
+    val_prop     = cfg["partitioning"]["val_prop"]
 
     # Sampling
-    num_train_samples = cfg["sampling"]["num_train_samples"]
-    train_prop     = cfg["sampling"]["train_prop"]
-    keep_interactive = cfg["sampling"]["keep_interactive"]
-    use_filter = cfg["sampling"]["use_filter"]
+    num_train_samples = cfg["diversity_sampling"]["num_train_samples"]
+    train_prop        = cfg["diversity_sampling"]["train_prop"]
+    emb_model         = cfg["diversity_sampling"]["emb_model"]
+    method            = cfg["diversity_sampling"]["method"]
+    reduce_dims       = cfg["diversity_sampling"]["reduce_dims"]
+    n_components      = cfg["diversity_sampling"]["n_components"]
+    spread_sampling   = cfg["diversity_sampling"].get("spread_sampling", False)
+    keep_interactive  = cfg["diversity_sampling"]["keep_interactive"]
 
     # Evaluation random vs. diversity
-    div_eval         = cfg["evaluation"]["div_eval"]
-    model_name       = cfg["evaluation"]["model_name"]
-    num_epochs       = cfg["evaluation"]["num_epochs"]
-    batch_size       = cfg["evaluation"]["batch_size"]
+    evaluate_data = cfg["evaluation"]["evaluate_data"]
+    model_name    = cfg["evaluation"]["model_name"]
+    num_epochs    = cfg["evaluation"]["num_epochs"]
+    batch_size    = cfg["evaluation"]["batch_size"]
+    run_efficiency_curve = cfg["evaluation"].get("efficiency_curve", False)
+    sample_sizes  = cfg["evaluation"].get("sample_sizes", [100, 200, 300, 500, 750, 1000])
 
     # Configure logger:
     log_path = output_folder / "sampling_pipeline_log.txt"
@@ -170,68 +191,102 @@ if __name__ == "__main__":
 
     # Initialize Diversity Sampler
     sampler = DiversitySampler(
-        emb_model="openclip",
-        method="kmeans_elbow",
+        emb_model=emb_model,
+        method=method,
         keep_interactive = keep_interactive,
+        spread_sampling = spread_sampling,
     )
 
     # Load and process data
-    if processed_dir.exists() and split_data_dir.exists():
-        logger.info("Found existing processed/ and split_data/ — skipping straight to sampling...")
-        skip_split = True
+    if processed_dir.exists():
+        logger.info("Found existing processed data — loading from cache...")
         frames = np.load(processed_dir / "frames.npy")
-        masks  = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
+        masks = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
         labels = np.load(processed_dir / "labels.npy", allow_pickle=True) if (processed_dir / "labels.npy").exists() else None
         frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
-    elif processed_dir.exists():
-        logger.info("Found existing processed/ — skipping data loading...")
-        frames = np.load(processed_dir / "frames.npy")
-        masks  = np.load(processed_dir / "masks.npy") if (processed_dir / "masks.npy").exists() else None
-        labels = np.load(processed_dir / "labels.npy", allow_pickle=True) if (processed_dir / "labels.npy").exists() else None
-        frame_metadata = np.load(processed_dir / "frame_metadata.npy", allow_pickle=True) if (processed_dir / "frame_metadata.npy").exists() else None
+        
+        color_map_json = processed_dir / "color_map.json"
+        color_map = {}
+        if color_map_json.exists():
+            with open(color_map_json) as f:
+                color_map = {int(k): v for k, v in json.load(f).items()}
+                
+        if split_data_dir.exists():
+            skip_split = True
+            logger.info("Found existing split_data/ — skipping split...")
     else:
+        color_map = {}
+
         if task_evaluation == "phase_classification":
-            logger.info("Loading frames only for phase classification...")
+            logger.info("Loading frames for phase classification...")
             if annotated:
                 if dataset_style == "pitvis":
                     frames, masks, color_map, labels, frame_metadata = dm.load_frames_and_masks(
                         data_folder=data_folder,
                         dataset_style="pitvis",
+                        output_folder=output_folder
                     )
-                    # labels contains phase annotations from pitvis_extractor
+                elif dataset_style == "video" and labels_path is not None:
+                    frames, frame_metadata = dm.load_frames_from_dir(
+                        data_folder=data_folder,
+                        dataset_style=dataset_style,
+                        videos=[str(v) for v in train_videos] if train_videos else None,
+                        videos_fps=videos_fps,
+                        filtering=filtering,
+                        output_folder=output_folder,
+                    )
+                    labels = None
+                    masks = None
                 else:
                     raise ValueError(
-                        "Phase classification requires temporal labels — only 'pitvis' dataset style "
-                        "is currently supported for phase classification. For other datasets, provide "
-                        "a CSV with per-frame phase labels."
+                        "Phase classification requires temporal labels — use 'pitvis' dataset style, "
+                        "or 'video' style with a labels_path CSV providing per-frame phase labels."
                     )
             else:
-                frames, frame_metadata = dm.load_frames_from_dir(data_folder=data_folder)
+                frames, frame_metadata = dm.load_frames_from_dir(
+                    data_folder=data_folder,
+                    dataset_style=dataset_style,
+                    videos_fps=videos_fps,
+                    filtering=filtering,
+                    output_folder=output_folder
+                )
                 labels = None
                 masks = None
-            
+
         elif task_evaluation == "segmentation":
             logger.info("Loading frames and masks for segmentation...")
             if annotated:
+                # works for video / non-video datasets
                 result = dm.load_frames_and_masks(
                     data_folder=data_folder,
                     output_folder=output_folder,
                     mask_type=mask_type,
                     dataset_style=dataset_style,
+                    videos_fps=videos_fps,
+                    filtering=filtering,
                 )
+
                 if len(result) == 5:
                     frames, masks, color_map, labels, frame_metadata = result
                 else:
                     frames, masks, color_map, frame_metadata = result
                     labels = None
             else:
-                frames, frame_metadata = dm.load_frames_from_dir(data_folder=data_folder)
+                frames, frame_metadata = dm.load_frames_from_dir(
+                    data_folder=data_folder,
+                    dataset_style=dataset_style,
+                    videos_fps=videos_fps,
+                    output_folder=output_folder,
+                    filtering=filtering,
+                )
                 masks = None
                 labels = None
+            
         else:
             raise ValueError(
-                        "Please provide a correct task evaluation: 'phase classification' or 'segmentation'"
-                    )
+                f"Unknown task_evaluation '{task_evaluation}'. "
+                f"Choose 'phase_classification' or 'segmentation'."
+            )
 
     if labels_path is not None and labels is None:
         labels_df = pd.read_csv(labels_path)
@@ -241,79 +296,14 @@ if __name__ == "__main__":
     logger.info(f"Loaded {len_total_frames} frames")
 
     # Split data
-    if split_by_dir:
-        logger.info("Splitting by directory name...")
-        split_by_directory(data_folder=output_folder)
-    elif not skip_split:
-        logger.info("Performing random train/val/test split...")
-        train_val_test_split(
-            data_folder=output_folder,
-            test_size=test_prop,
-            val_size=val_prop,
-        )
-
-    # Load train split for sampling
-    if split_by_dir and skip_split:
-        logger.info("split_by_dir ignored because skip_split=true and existing splits found.")
-
     if skip_split:
-        train_frames = frames
-        train_masks  = masks
-        train_frame_metadata = frame_metadata
-    else:
-        logger.info("Loading train split...")
-        train_frames = np.load(split_data_dir / "train" / "frames.npy")
-        train_masks_path = split_data_dir / "train" / "masks.npy"
-        train_masks = np.load(train_masks_path) if train_masks_path.exists() else None
-        train_metadata_path = split_data_dir / "train" / "frame_metadata.npy"
-        train_frame_metadata = np.load(train_metadata_path, allow_pickle=True) if train_metadata_path.exists() else None
-
-    if num_train_samples is not None:
-        num_train_samples = num_train_samples
-    elif train_prop is not None:
-        num_train_samples = int(train_prop * len(train_frames))
-    else:
-        raise ValueError("Please indicate either a percent of training data or a total sample size under sampling configuration")
-
-    # Diversity Sampling
-    logger.info(f"Running diversity sampling — target n={num_train_samples}...")
-    diversity_out = split_data_dir / "train"
-    _, div_frames, div_masks, div_indices, div_out_path = sampler.sample(
-        data_arr=train_frames,
-        mask_arr=train_masks,
-        num_samples=num_train_samples,
-        run_eval=div_eval,
-        use_filter=use_filter,
-        save_data=True,
-        data_dir=str(diversity_out),
-        frame_metadata=train_frame_metadata,
-    )
-    logger.info(f"Diversity sampling complete — selected {len(div_indices)} frames")
-
-    # Random sampling
-    logger.info("Running random sampling...")
-    random_indices = np.random.choice(len(train_frames), size=num_train_samples, replace=False)
-    logger.info(f"Random sampling complete — selected {len(random_indices)} frames")
-    random_out = split_data_dir / "train" / "random"
-    random_out.mkdir(parents=True, exist_ok=True)
-    np.save(random_out / "frames.npy", train_frames[random_indices])
-    np.save(random_out / "random_indices.npy", random_indices)
-    if train_masks is not None:
-        np.save(random_out / "masks.npy", train_masks[random_indices])
-    if train_frame_metadata is not None:
-        np.save(random_out / "frame_metadata.npy", train_frame_metadata[random_indices])
-        index_map = {int(i): str(train_frame_metadata[i]) for i in random_indices}
-        with open(random_out / "index_to_frame.json", "w") as f:
-            json.dump(index_map, f, indent=2)
-
-    if div_eval:
-        logger.info("Running model training evaluation...")
-
-        train_videos = None
-        val_videos = None
-        test_videos = None
-
-        if dataset_style == "pitvis":
+        logger.info("Skipping split...")
+    elif split_by_dir:
+        # Split data by directory / filenames (contains val/test/train in name)
+        logger.info("Splitting data by directory...")
+        split_by_directory(data_folder=output_folder)
+    elif dataset_style in {"pitvis", "video"}:
+        if choose_videos or not train_videos:
             train_videos = []
             logger.info("Enter video IDs to use for training (one or more per line, blank line to finish):")
             while True:
@@ -338,7 +328,6 @@ if __name__ == "__main__":
                     except ValueError:
                         print(f"Skipping non-integer value: {item!r}")
 
-            # Find remaining videos and assign to validation (if any)
             all_videos = sorted({
                 int(m.group(1))
                 for d in os.listdir(data_folder)
@@ -349,60 +338,210 @@ if __name__ == "__main__":
             val_videos = [v for v in all_videos if v not in train_videos and v not in test_videos]
 
             logger.info(f"Training videos: {train_videos}")
-            logger.info(f"Test video: {test_videos}")
-            logger.info(f"Remaining videos (if any) for validation: {val_videos}")
+            logger.info(f"Test videos: {test_videos}")
+            logger.info(f"Validation videos: {val_videos}")
 
-        # Pass correct val/test root as none or not based on dataset_style
+        split_by_video_ids(
+            output_folder=output_folder,
+            train_videos=train_videos,
+            val_videos=val_videos,
+            test_videos=test_videos,
+            frames=frames,
+            masks=masks,
+            labels=labels,
+            frame_metadata=frame_metadata,
+        )
+
+    else:
+        # Split data into train/val/test using default random train_val_test_split function
+        logger.info("Splitting data into train/val/test...")
+        train_val_test_split(
+            data_folder=output_folder,
+            test_size=test_prop,
+            val_size=val_prop,
+        )
+
+    # Load train split for sampling
+    if skip_split:
+        train_frames = frames
+        train_masks  = masks
+        train_frame_metadata = frame_metadata
+    else:
+        logger.info("Loading train split...")
+        train_frames = np.load(split_data_dir / "train" / "frames.npy")
+        train_masks_path = split_data_dir / "train" / "masks.npy"
+        train_masks = np.load(train_masks_path) if train_masks_path.exists() else None
+        train_metadata_path = split_data_dir / "train" / "frame_metadata.npy"
+        train_frame_metadata = np.load(train_metadata_path, allow_pickle=True) if train_metadata_path.exists() else None
+
+    # Determine number/proportion of training samples to select for diversity sampling
+    if num_train_samples is None and train_prop is None:
+        raise ValueError("Please indicate either a percent of training data or a total sample size under sampling configuration")
+    elif num_train_samples is None and train_prop is not None:
+        if train_prop <= 0 or train_prop > 1.0:
+            raise ValueError("Please provide a proper train_prop (0.0, 1.0]")
+        num_train_samples = int(train_prop * len(train_frames))
+        if num_train_samples <= 0:
+            raise ValueError(f"train_prop={train_prop} results in zero training samples for {len(train_frames)} frames")
+
+    # Check for existing diversity sampling outputs
+    diversity_out = split_data_dir / "train"
+    existing_diversity = diversity_out / "diversity"
+
+    # find the most recent diversity dir
+    if not existing_diversity.exists():
+        for i in range(1, 20):
+            candidate = diversity_out / f"diversity_{i}"
+            if not candidate.exists():
+                break
+            existing_diversity = candidate
+
+    div_out_path = None
+    div_frames = None
+    div_masks = None
+    div_indices = None
+
+    # Run Diversity Sampling if no previous examples exist
+    if existing_diversity.exists() and (existing_diversity / "frames.npy").exists():
+        logger.info(f"Found existing diversity sampling outputs at {existing_diversity} — skipping sampling...")
+        div_frames  = np.load(existing_diversity / "frames.npy")
+        div_masks   = np.load(existing_diversity / "masks.npy") if (existing_diversity / "masks.npy").exists() else None
+        div_indices = np.load(existing_diversity / "diverse_indices.npy")
+        div_out_path = str(existing_diversity)
+        logger.info(f"Loaded {len(div_indices)} diverse frames from existing outputs")
+    else:
+        logger.info(f"Running diversity sampling — target n={num_train_samples}...")
+        _, div_frames, div_masks, div_indices, div_out_path = sampler.sample(
+            data_arr=train_frames,
+            mask_arr=train_masks,
+            num_samples=num_train_samples,
+            reduce_dims=reduce_dims,
+            n_components=n_components,
+            run_eval=evaluate_data,
+            save_data=True,
+            data_dir=str(diversity_out),
+            frame_metadata=train_frame_metadata,
+        )
+        logger.info(f"Diversity sampling complete — selected {len(div_indices)} frames")
+
+    # Check for existing random sampling outputs
+    random_out = split_data_dir / "train" / "random"
+
+    if random_out.exists() and (random_out / "random_indices.npy").exists():
+        logger.info("Found existing random sampling outputs — skipping random sampling...")
+        random_indices = np.load(random_out / "random_indices.npy")
+        logger.info(f"Loaded {len(random_indices)} random indices from existing outputs")
+    else:
+        # Randomly sample the same number of frames as diversity sampling for comparison
+        if num_train_samples > len(train_frames):
+            raise ValueError(f"Requested {num_train_samples} random samples, but only {len(train_frames)} frames available.")
+
+        # Random Sample
+        logger.info("Running random sampling...")
+        random_indices = np.random.choice(len(train_frames), size=num_train_samples, replace=False)
+        logger.info(f"Random sampling complete — selected {len(random_indices)} frames")
+        random_out.mkdir(parents=True, exist_ok=True)
+        np.save(random_out / "frames.npy", train_frames[random_indices])
+        np.save(random_out / "random_indices.npy", random_indices)
+        
+        if train_masks is not None:
+            np.save(random_out / "masks.npy", train_masks[random_indices])
+        if train_frame_metadata is not None:
+            np.save(random_out / "frame_metadata.npy", train_frame_metadata[random_indices])
+            index_map = {int(i): str(train_frame_metadata[i]) for i in random_indices}
+            with open(random_out / "index_to_frame.json", "w") as f:
+                json.dump(index_map, f, indent=2)
+
+    if evaluate_data:
+        logger.info("Running model training evaluation...")
+
+        # load val/test from split npy files
         val_root_path  = split_data_dir / "val"
         test_root_path = split_data_dir / "test"
 
-        val_root_valid  = has_valid_data(val_root_path,  dataset_style)
-        test_root_valid = has_valid_data(test_root_path, dataset_style)
+        val_frames_for_eval = np.load(val_root_path  / "frames.npy") if has_valid_data(val_root_path, dataset_style) else None
+        val_masks_for_eval = np.load(val_root_path  / "masks.npy")  if val_frames_for_eval  is not None and (val_root_path  / "masks.npy").exists() else None
+        test_frames_for_eval = np.load(test_root_path / "frames.npy") if has_valid_data(test_root_path, dataset_style) else None
+        test_masks_for_eval = np.load(test_root_path / "masks.npy")  if test_frames_for_eval is not None and (test_root_path / "masks.npy").exists() else None
 
-        # Load val/test frames if available:
-        val_frames_for_eval  = None
-        val_masks_for_eval   = None
-        test_frames_for_eval = None
-        test_masks_for_eval  = None
+        # derive labels for val/test
+        val_labels_for_eval  = None
+        test_labels_for_eval = None
+        if task_evaluation == "segmentation":
+            val_labels_for_eval  = val_masks_for_eval.reshape(len(val_masks_for_eval),   -1)[:, 0].astype(np.int64) if val_masks_for_eval  is not None else None
+            test_labels_for_eval = test_masks_for_eval.reshape(len(test_masks_for_eval), -1)[:, 0].astype(np.int64) if test_masks_for_eval is not None else None
+        elif task_evaluation == "phase_classification":
+            val_labels_for_eval  = np.load(val_root_path  / "labels.npy")[:, 0] if val_frames_for_eval  is not None and (val_root_path  / "labels.npy").exists() else None
+            test_labels_for_eval = np.load(test_root_path / "labels.npy")[:, 0] if test_frames_for_eval is not None and (test_root_path / "labels.npy").exists() else None
 
-        if val_root_valid:
-            val_frames_for_eval = np.load(val_root_path / "frames.npy")
-            val_masks_for_eval  = np.load(val_root_path / "masks.npy") if (val_root_path / "masks.npy").exists() else None
-
-        if test_root_valid:
-            test_frames_for_eval = np.load(test_root_path / "frames.npy")
-            test_masks_for_eval  = np.load(test_root_path / "masks.npy") if (test_root_path / "masks.npy").exists() else None
-        
-        # Make sure there are embeddings
+        # embeddings, color_map, class_names, num_classes
         all_emb_path = os.path.join(div_out_path, "all_embeddings.npy") if div_out_path is not None else None
-        
-        # Make sure color_map is passed if available
+
         color_map_path = split_data_dir / "color_map.json"
         color_map_for_eval = None
         if color_map_path.exists():
             with open(color_map_path) as f:
                 color_map_for_eval = {int(k): v for k, v in json.load(f).items()}
 
-        # Make sure to set num_classes if not already set
+        # training labels sliced to train split, making sure indices work between diverse/random
+        if labels is not None:
+            if skip_split:
+                train_labels_for_eval = labels[:, 0] if labels.ndim == 2 else labels
+            else:
+                train_indices_path = split_data_dir / "train" / "indices.npy"
+                train_indices = np.load(train_indices_path) if train_indices_path.exists() else None
+                if train_indices is not None:
+                    train_labels_for_eval = labels[train_indices, 0] if labels.ndim == 2 else labels[train_indices]
+                else:
+                    train_labels_for_eval = labels[:, 0] if labels.ndim == 2 else labels
+
+                if len(train_labels_for_eval) != len(train_frames):
+                    logger.warning(
+                        f"train_labels_for_eval size {len(train_labels_for_eval)} != "
+                        f"train_frames size {len(train_frames)} — truncating to match"
+                    )
+                    train_labels_for_eval = train_labels_for_eval[:len(train_frames)]
+        else:
+            train_labels_for_eval = None
+
+        # Make sure that num_classes is determined either from color_map, train_labels_for_eval, or passed explicitly
         if num_classes is None and color_map_for_eval is not None:
             num_classes = len(color_map_for_eval)
 
-        # Provide training data:
-        train_indices_path = split_data_dir / "train" / "indices.npy"
-        train_indices = np.load(train_indices_path) if train_indices_path.exists() else None
-        all_labels_for_eval = labels[train_indices] if labels is not None and train_indices is not None else labels
-        eval.main(
+        # If num_classes is still None, try to infer from train_labels_for_eval (exclude -1 label)
+        if num_classes is None and train_labels_for_eval is not None:
+            valid_labels = train_labels_for_eval[train_labels_for_eval >= 0]
+            num_classes = len(np.unique(valid_labels))
+            logger.info(f"Inferred num_classes={num_classes} from {len(np.unique(valid_labels))} unique labels")
+ 
+        if num_classes is None:
+            raise ValueError(
+                "num_classes could not be inferred — set it explicitly in the config under annotation.num_classes"
+            )
+
+        # Handle negative label name for pitvis phase classification if available
+        negative_label_name = None
+        if dataset_style == "pitvis" and task_evaluation == "phase_classification":
+            phase_classes_path = split_data_dir / "phase_classes.json"
+            if phase_classes_path.exists():
+                with open(phase_classes_path) as f:
+                    phase_meta = json.load(f)
+                num_classes = phase_meta["num_classes"]
+                class_names_by_raw_label = {int(k): v for k, v in phase_meta["class_names_by_raw_label"].items()}
+                class_names_for_eval = [class_names_by_raw_label[k] for k in sorted(class_names_by_raw_label)]
+                negative_label_name = phase_meta["unlabeled_name"]
+            else:
+                logger.warning(f"{phase_classes_path} not found — using generic class names.")
+                class_names_for_eval = [str(i) for i in range(num_classes)]
+        else:
+            class_names_for_eval = [str(i) for i in range(num_classes)]
+
+        ev.main(
             task=task_evaluation,
-            dataset_root=str(data_folder),
             dataset_style=dataset_style,
-            train_root=str(split_data_dir / "train") if dataset_style != "pitvis" else None,
-            val_root=str(val_root_path)   if val_root_valid  else None,
-            test_root=str(test_root_path) if test_root_valid else None,
-            train_videos=train_videos,
-            val_videos=val_videos,
-            test_videos=test_videos,
             output_dir=str(output_folder / "eval_outputs"),
-            model_name=model_name,
+            sampling_dir=str(split_data_dir / "train"),
+            model_name=model_name if task_evaluation == "segmentation" else "LightweightPhaseClassifier",
             num_classes=num_classes,
             num_epochs=num_epochs,
             batch_size=batch_size,
@@ -418,7 +557,36 @@ if __name__ == "__main__":
             test_frames=test_frames_for_eval,
             test_masks=test_masks_for_eval,
             color_map=color_map_for_eval,
-            all_labels_train=labels[train_indices] if labels is not None and train_indices is not None else labels,
+            train_labels=train_labels_for_eval,
+            val_labels=val_labels_for_eval,
+            test_labels=test_labels_for_eval,
+            class_names=class_names_for_eval,
+            negative_label_name=negative_label_name,
         )
+
+        if run_efficiency_curve:
+            logger.info("Running data efficiency curve...")
+            ev.run_data_efficiency_curve(
+                task=task_evaluation,
+                output_dir=str(output_folder / "eval_outputs"),
+                model_name=model_name if task_evaluation == "segmentation" else "LightweightPhaseClassifier",
+                num_classes=num_classes,
+                num_epochs=num_epochs,
+                batch_size=batch_size,
+                all_train_emb=np.load(all_emb_path) if all_emb_path is not None and os.path.exists(all_emb_path) else None,
+                all_train_frames=train_frames,
+                all_train_masks=train_masks,
+                all_train_labels=train_labels_for_eval,
+                test_frames=test_frames_for_eval,
+                test_masks=test_masks_for_eval,
+                test_labels=test_labels_for_eval,
+                color_map=color_map_for_eval,
+                class_names=class_names_for_eval,
+                sample_sizes=sample_sizes,
+                negative_label_name=negative_label_name,
+                emb_model=emb_model,
+                method=method,
+                spread_sampling=spread_sampling,
+            )
 
     logger.info("Done!")
