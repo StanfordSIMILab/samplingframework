@@ -105,6 +105,8 @@ if __name__ == "__main__":
                 ├── nn_coverage.png
                 ├── pca_coverage_heatmap.png
                 └── umap_selected.png
+    
+    * If pipeline stopped halfway, script automatically resumes at proper step
     """
     # parser to allow user to use separate custom configurations
     parser = argparse.ArgumentParser()
@@ -163,12 +165,13 @@ if __name__ == "__main__":
     keep_interactive  = cfg["diversity_sampling"]["keep_interactive"]
 
     # Evaluation random vs. diversity
-    evaluate_data = cfg["evaluation"]["evaluate_data"]
-    model_name    = cfg["evaluation"]["model_name"]
-    num_epochs    = cfg["evaluation"]["num_epochs"]
-    batch_size    = cfg["evaluation"]["batch_size"]
+    evaluate_data  = cfg["evaluation"]["evaluate_data"]
+    use_pretrained = cfg["evaluation"]["use_pretrained"]
+    model_name     = cfg["evaluation"]["model_name"]
+    num_epochs     = cfg["evaluation"]["num_epochs"]
+    batch_size     = cfg["evaluation"]["batch_size"]
     run_efficiency_curve = cfg["evaluation"].get("efficiency_curve", False)
-    sample_sizes  = cfg["evaluation"].get("sample_sizes", [100, 200, 300, 500, 750, 1000])
+    sample_sizes   = cfg["evaluation"].get("sample_sizes", [100, 200, 300, 500, 750, 1000])
 
     # Configure logger:
     log_path = output_folder / "sampling_pipeline_log.txt"
@@ -541,7 +544,8 @@ if __name__ == "__main__":
             dataset_style=dataset_style,
             output_dir=str(output_folder / "eval_outputs"),
             sampling_dir=str(split_data_dir / "train"),
-            model_name=model_name if task_evaluation == "segmentation" else "LightweightPhaseClassifier",
+            use_pretrained=use_pretrained,
+            model_name=model_name if task_evaluation == "segmentation" else "PhaseClassifier",
             num_classes=num_classes,
             num_epochs=num_epochs,
             batch_size=batch_size,
@@ -584,8 +588,11 @@ if __name__ == "__main__":
                 class_names=class_names_for_eval,
                 sample_sizes=sample_sizes,
                 negative_label_name=negative_label_name,
+                use_pretrained=use_pretrained,
                 emb_model=emb_model,
                 method=method,
+                reduce_dims=reduce_dims,
+                n_components=n_components,
                 spread_sampling=spread_sampling,
             )
 

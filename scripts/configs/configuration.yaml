@@ -3,9 +3,9 @@
 
 # Load Dataset Parameters:
 data:
-  data_dir: "/path/to/your/data/directory"
+  data_dir: "/path/to/raw/data" # Path to your raw data
   annotated: True                 # Determine whether diversity sampling annotated vs. unannotated data
-  dataset_style: "cholec"         # 'cholec', 'pitvis', 'flat', 'nested' or 'video' *more info at bottom
+  dataset_style: "pitvis"         # 'cholec', 'pitvis', 'flat', 'nested' or 'video' *more info at bottom
   videos_fps: 5.0                 # Custom fps for sampling frames from dataset of videos (unless its pitvis)
   filtering: null                 # optional filter before div sampling: 'fvi' or null
 
@@ -18,7 +18,7 @@ video:
   
 # If annotated is True, allow user to choose task / set-up
 annotation:
-  task_evaluation: "segmentation" # 'segmentation' or 'phase_classification'
+  task_evaluation: "phase_classification" # 'segmentation' or 'phase_classification'
   mask_type: "color_mask"         # if segmentation: 'color_mask' or 'mask' **more info at bottom
   num_classes: null               # null to infer from dataset
   labels_path: null               # optional: path to CSV for non-pitvis phase classification
@@ -26,7 +26,7 @@ annotation:
 # Allow users to split data
 partitioning:
   skip_split: false              # Toggle whether to partion data or not
-  split_by_dir: true             # if folder/file names contain key words like train/val(idation)/test, split by name
+  split_by_dir: false            # if folder/file names contain key words like train/val(idation)/test, split by name
   test_prop: 0.1                 # ignored if split_by_dir=true
   val_prop: 0.1                  # ignored if split_by_dir=true, 0.0 to skip validation split
 
@@ -37,18 +37,19 @@ diversity_sampling:
   emb_model: 'openclip'          # Embedding model to use for diversity sampling: 'openclip', 'resnet50', or 'resnet18'
   method: 'kmeans_sil'           # Clustering method to use: 'hbdscan', 'dbscan', 'kmeans_elbow', or 'kmeans_sil'
   reduce_dims: true              # set true to use PCA to reduce embedding dimensions before clustering
-  n_components: 64               # if reduce_dims = true, then reduce to n_components dimensions
+  n_components: 128              # if reduce_dims = true, then PCA produces a {n_components} dimensional embedding
   spread_sampling: true          # set true to sample points broadly throughout cluster instead of the points closest to cluster center
   keep_interactive: false        # Allow you to choose fvi filtering threshold and manually remove/recluster for diversity sampling
 
 # Specific parameters for evaluating diversity / random on training model
 evaluation:
   evaluate_data: true            # Toggle on full random vs. diverse evaluation / training
+  use_pretrained: true           # Use pretrained backbone vs. training from scratch
   model_name: 'segformer'        # only if segmentation: 'deeplab', 'unet', 'mask2former', 'segformer', 'upernet'
-  num_epochs: 30                 # number of epochs to train model on segmentation vs. phase classification
+  num_epochs: 20                 # number of epochs to train model on segmentation vs. phase classification
   batch_size: 1                  # use batch_size=1 for SGD-style convergence tracking
   efficiency_curve: true         # train model on increasing sample sizes to visualize diversity vs. random efficiency
-  sample_sizes: [10, 50, 100, 200, 300, 500, 750, 1000] # sample sizes evaluated for efficiency curve (ignored if efficiency_curve=false)
+  sample_sizes: [10, 50, 100, 250, 500, 750, 1000] # sample sizes evaluated for efficiency curve (ignored if efficiency_curve=false)
 
 # * Different Dataset Structures supported:
 # 'cholec'

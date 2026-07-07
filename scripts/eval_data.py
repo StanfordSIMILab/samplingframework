@@ -23,6 +23,7 @@ from sklearn.preprocessing import normalize
 from kneed import KneeLocator
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from transformers import (
     Mask2FormerImageProcessor,
     Mask2FormerForUniversalSegmentation,
@@ -60,10 +61,14 @@ def setup_logger(output_dir: str) -> logging.Logger:
 
 # Dataset utilities
 class SurgicalDataset(Dataset):
-    def __init__(self, frames: np.ndarray, labels: np.ndarray, size: int = 128):
+    def __init__(self, frames: np.ndarray, labels: np.ndarray, size: int = 128, use_pretrained: bool = False):
         self.frames = frames
         self.labels = labels
-        self.size = size
+        self.use_pretrained = use_pretrained
+        self.size = 224 if use_pretrained else size
+        if use_pretrained:
+            self.mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+            self.std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
     def __len__(self) -> int:
         return len(self.frames)
@@ -71,6 +76,8 @@ class SurgicalDataset(Dataset):
     def __getitem__(self, idx: int):
         img = cv2.resize(self.frames[idx], (self.size, self.size))
         img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+        if self.use_pretrained:
+            img = (img - self.mean) / self.std
         return img, torch.tensor(self.labels[idx], dtype=torch.long)
 
 class HFSegDataset(Dataset):
@@ -226,38 +233,55 @@ class PretrainedPhaseClassifier(nn.Module):
         return self.net(x)
 
 # Hugging face models
-def build_model(num_classes: int, model_name: str | None = None):
+def build_model(num_classes: int, model_name: str | None = None, use_pretrained: bool = True):
     if model_name == "mask2former":
         mid  = _HF_IDS["mask2former"]
         proc = Mask2FormerImageProcessor.from_pretrained(mid)
-        mdl  = Mask2FormerForUniversalSegmentation.from_pretrained(
-            mid, num_labels=num_classes, ignore_mismatched_sizes=True)
+        if use_pretrained:
+            mdl = Mask2FormerForUniversalSegmentation.from_pretrained(
+                mid, num_labels=num_classes, ignore_mismatched_sizes=True)
+        else:
+            config = Mask2FormerForUniversalSegmentation.from_pretrained(mid).config
+            config.num_labels = num_classes
+            mdl = Mask2FormerForUniversalSegmentation(config)
         return proc, mdl
 
     elif model_name == "segformer":
         mid  = _HF_IDS["segformer"]
         proc = AutoImageProcessor.from_pretrained(mid)
-        mdl  = SegformerForSemanticSegmentation.from_pretrained(
-            mid, num_labels=num_classes, ignore_mismatched_sizes=True)
+        if use_pretrained:
+            mdl = SegformerForSemanticSegmentation.from_pretrained(
+                mid, num_labels=num_classes, ignore_mismatched_sizes=True)
+        else:
+            config = SegformerForSemanticSegmentation.from_pretrained(mid).config
+            config.num_labels = num_classes
+            mdl = SegformerForSemanticSegmentation(config)
         return proc, mdl
 
     elif model_name == "upernet":
         mid  = _HF_IDS["upernet"]
         proc = AutoImageProcessor.from_pretrained(mid)
-        mdl  = UperNetForSemanticSegmentation.from_pretrained(
-            mid, num_labels=num_classes, ignore_mismatched_sizes=True)
+        if use_pretrained:
+            mdl = UperNetForSemanticSegmentation.from_pretrained(
+                mid, num_labels=num_classes, ignore_mismatched_sizes=True)
+        else:
+            config = UperNetForSemanticSegmentation.from_pretrained(mid).config
+            config.num_labels = num_classes
+            mdl = UperNetForSemanticSegmentation(config)
         return proc, mdl
 
     elif model_name == "deeplab":
         import torchvision
-        mdl = torchvision.models.segmentation.deeplabv3_resnet101(weights="DEFAULT")
+        weights = "DEFAULT" if use_pretrained else None
+        mdl = torchvision.models.segmentation.deeplabv3_resnet101(weights=weights)
         mdl.classifier[-1]     = torch.nn.Conv2d(256, num_classes, 1)
         mdl.aux_classifier[-1] = torch.nn.Conv2d(256, num_classes, 1)
         return None, mdl
 
     elif model_name == "unet":
         import segmentation_models_pytorch as smp
-        mdl = smp.Unet(encoder_name="resnet50", encoder_weights="imagenet",
+        encoder_weights = "imagenet" if use_pretrained else None
+        mdl = smp.Unet(encoder_name="resnet50", encoder_weights=encoder_weights,
                        in_channels=3, classes=num_classes)
         return None, mdl
 
@@ -325,6 +349,7 @@ def train_loop(
     num_epochs: int = 30,
     batch_size: int = 1,
     logger: logging.Logger | None = None,
+    use_pretrained: bool = True,
 ):
     log = logger.info if logger else print
 
@@ -351,7 +376,7 @@ def train_loop(
     opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
     train_dl = DataLoader(
-        SurgicalDataset(x_train, train_labels),
+        SurgicalDataset(frames=x_train, labels=train_labels, use_pretrained=use_pretrained),
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
@@ -359,11 +384,12 @@ def train_loop(
 
     best_val_loss = float("inf")
     best_model_state = None 
+    best_model_epoch = 0
 
     val_dl = None
     if x_val is not None and val_labels is not None:
         val_dl = DataLoader(
-            SurgicalDataset(x_val, val_labels),
+            SurgicalDataset(frames=x_val, labels=val_labels, use_pretrained=use_pretrained),
             batch_size=batch_size,
             shuffle=False,
             num_workers=0,
@@ -372,7 +398,7 @@ def train_loop(
     test_dl = None
     if x_test is not None and test_labels is not None:
         test_dl = DataLoader(
-            SurgicalDataset(x_test, test_labels),
+            SurgicalDataset(frames=x_test, labels=test_labels, use_pretrained=use_pretrained),
             batch_size=batch_size,
             shuffle=False,
             num_workers=0,
@@ -442,6 +468,10 @@ def train_loop(
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
+                    best_model_epoch = epoch
+                    msg += (
+                        f": new best model saved for inference"
+                    )
 
             log(msg)
 
@@ -453,6 +483,9 @@ def train_loop(
         # If validation included, run test on model with best validation loss
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
+            log(f"Running test inference with best model from epoch {best_model_epoch}")
+        else:
+            log("Running test inference on most recent model")
 
         model.eval()
         all_preds = []
@@ -565,6 +598,7 @@ def train_loop_hf(
 
     best_val_loss = float("inf")
     best_model_state = None
+    best_model_epoch = 0
 
     val_dl = None
     if x_val is not None and val_labels is not None:
@@ -693,6 +727,10 @@ def train_loop_hf(
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
+                    best_model_epoch = epoch
+                    msg += (
+                        f": new best model saved for inference"
+                    )
 
             log(msg)
 
@@ -704,6 +742,10 @@ def train_loop_hf(
         # If validation included, run test on model with best validation loss
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
+            log(f"Running test inference with best model from epoch {best_model_epoch}")
+        else:
+            log("Running test inference on most recent model")
+
         model.eval()
         all_preds = []
         all_gts = []
@@ -786,16 +828,16 @@ def train_phase_classifier(
     x_train, train_labels, x_val, val_labels,
     x_test, test_labels,
     label, num_classes, class_names, num_epochs=30, batch_size=1, logger=None,
-    has_negative_label = None, negative_class_name = "transition"
+    has_negative_label = None, negative_class_name = "transition",
+    use_pretrained: bool = True,
 ):
-    # Deal with -1 labels for transition frames (pitvis) by remapping to num_classes for training
     if has_negative_label is None:
         has_negative_label = detect_negative_labels(train_labels, val_labels, test_labels)
     effective_num_classes = num_classes + 1 if has_negative_label else num_classes
     if has_negative_label:
         class_names = list(class_names) + [negative_class_name]
 
-    model = LightCNN(effective_num_classes)
+    model = PretrainedPhaseClassifier(effective_num_classes) if use_pretrained else LightCNN(effective_num_classes)
     return train_loop(
         x_train=x_train, train_labels=train_labels,
         x_val=x_val, val_labels=val_labels,
@@ -804,13 +846,14 @@ def train_phase_classifier(
         effective_num_classes=effective_num_classes,
         class_names=class_names, has_negative_label=has_negative_label,
         model=model, num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+        use_pretrained=use_pretrained,
     )
 
 def train_segmentation_model(
     x_train, train_labels, x_val, val_labels,
     x_test, test_labels,
     label, num_classes, class_names, model_name=None, num_epochs=30, batch_size=1, logger=None,
-    has_negative_label = None, negative_class_name = "background"
+    has_negative_label = None, negative_class_name = "background", use_pretrained=True,
 ):
     # Deal with -1 labels for background pixels (segmentation) by remapping to num_classes for training
     if has_negative_label is None:
@@ -819,7 +862,7 @@ def train_segmentation_model(
     if has_negative_label:
         class_names = list(class_names) + [negative_class_name]
 
-    processor, model = build_model(effective_num_classes, model_name=model_name)
+    processor, model = build_model(effective_num_classes, model_name=model_name, use_pretrained=use_pretrained)
 
     if model_name in {"mask2former", "segformer", "upernet"}:
         optimizer = None
@@ -1023,6 +1066,7 @@ def run_data_efficiency_curve(
     class_names: list | None = None,
     sample_sizes: list | None = None,
     negative_label_name: str | None = None,
+    use_pretrained: bool = True,
     # sampler parameters
     sampler: DiversitySampler | None = None,
     emb_model: str = "openclip",
@@ -1111,32 +1155,40 @@ def run_data_efficiency_curve(
         if task == "phase_classification":
             # Run diverse frames
             _, _, _, _, bal_div = train_phase_classifier(
-                div_frames, div_labels, None, None, test_frames, test_labels,
-                f"diverse_n{n}", num_classes, class_names, num_epochs,
-                batch_size, logger,
-                has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+                x_train=div_frames, train_labels=div_labels, x_val=None, val_labels=None, 
+                x_test=test_frames, test_labels=test_labels,
+                label=f"diverse_n{n}", num_classes=num_classes, class_names=class_names, 
+                num_epochs=num_epochs, batch_size=batch_size, logger=logger, 
+                has_negative_label=has_negative_label, negative_class_name=negative_label_name, 
+                use_pretrained=use_pretrained,
+                )
 
             # Run random frames
             _, _, _, _, bal_rand = train_phase_classifier(
-                rand_frames, rand_labels, None, None, test_frames, test_labels,
-                f"random_n{n}", num_classes, class_names, num_epochs,
-                batch_size, logger,
-                has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+                x_train=rand_frames, train_labels=rand_labels, x_val=None, val_labels=None, 
+                x_test=test_frames, test_labels=test_labels,
+                label=f"random_n{n}", num_classes=num_classes, class_names=class_names, 
+                num_epochs=num_epochs, batch_size=batch_size, logger=logger, 
+                has_negative_label=has_negative_label, negative_class_name=negative_label_name, 
+                use_pretrained=use_pretrained,
+                )
 
         elif task == "segmentation":
             # Run diverse frames
             _, _, _, _, bal_div = train_segmentation_model(
-                div_frames, div_masks, None, None, test_frames, test_masks,
-                f"diverse_n{n}", num_classes, class_names, model_name,
-                num_epochs, batch_size, logger,
-                has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+                x_train=div_frames, train_labels=div_masks, x_val=None, val_labels=None, 
+                x_test=test_frames, test_labels=test_masks,
+                label=f"diverse_n{n}", num_classes=num_classes, class_names=class_names, 
+                model_name=model_name, num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+                has_negative_label=has_negative_label, negative_class_name=negative_label_name, use_pretrained=use_pretrained,)
 
             # Run random frames
             _, _, _, _, bal_rand = train_segmentation_model(
-                rand_frames, rand_masks, None, None, test_frames, test_masks,
-                f"random_n{n}", num_classes, class_names, model_name,
-                num_epochs, batch_size, logger,
-                has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+                x_train=rand_frames, train_labels=rand_masks, x_val=None, val_labels=None, 
+                x_test=test_frames, test_labels=test_masks,
+                label=f"random_n{n}", num_classes=num_classes, class_names=class_names, 
+                model_name=model_name, num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+                has_negative_label=has_negative_label, negative_class_name=negative_label_name, use_pretrained=use_pretrained,)
 
         results[n] = {"diverse": bal_div, "random": bal_rand}
         logger.info(f"n={n} — diverse: {bal_div:.4f} | random: {bal_rand:.4f}")
@@ -1171,6 +1223,7 @@ def main(
     output_dir: str = "outputs",
     sampling_dir: str | None = None, # If using function outside main.py, allow user to save to user specific location
     # Training specific parameters
+    use_pretrained: bool = True,
     model_name: str | None = None,
     num_classes: int | None = None,
     num_epochs: int = 30,
@@ -1323,15 +1376,21 @@ def main(
 
         logger.info("Training on diverse dataset...")
         model_div, hist_div, preds_div, gts_div, bal_div = train_phase_classifier(
-            x_div, y_div, x_val, y_val, x_test, y_test,
-            "diverse", num_classes, class_names, num_epochs, batch_size, logger,
-            has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+            x_train=x_div, train_labels=y_div, x_val=x_val, val_labels=y_val, 
+            x_test=x_test, test_labels=y_test,
+            label="diverse", num_classes=num_classes, class_names=class_names, 
+            num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+            has_negative_label=has_negative_label, negative_class_name=negative_label_name,
+            use_pretrained=use_pretrained,)
  
         logger.info("Training on random dataset...")
         model_rand, hist_rand, preds_rand, gts_rand, bal_rand = train_phase_classifier(
-            x_rand, y_rand, x_val, y_val, x_test, y_test,
-            "random", num_classes, class_names, num_epochs, batch_size, logger,
-            has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+            x_train=x_rand, train_labels=y_rand, x_val=x_val, val_labels=y_val, 
+            x_test=x_test, test_labels=y_test,
+            label="random", num_classes=num_classes, class_names=class_names, 
+            num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+            has_negative_label=has_negative_label, negative_class_name=negative_label_name,
+            use_pretrained=use_pretrained,)
 
     elif task == "segmentation":
         if div_masks is None or rand_masks is None:
@@ -1352,15 +1411,21 @@ def main(
 
         logger.info("Training on diverse dataset...")
         model_div, hist_div, preds_div, gts_div, bal_div = train_segmentation_model(
-            x_div, y_div, x_val, y_val, x_test, y_test,
-            "diverse", num_classes, class_names, model_name, num_epochs, batch_size, logger,
-            has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+            x_train=x_div, train_labels=y_div, x_val=x_val, val_labels=y_val, 
+            x_test=x_test, test_labels=y_test,
+            label="diverse", num_classes=num_classes, class_names=class_names, model_name=model_name, 
+            num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+            has_negative_label=has_negative_label, negative_class_name=negative_label_name, 
+            use_pretrained=use_pretrained,)
 
         logger.info("Training on random dataset...")
         model_rand, hist_rand, preds_rand, gts_rand, bal_rand = train_segmentation_model(
-            x_rand, y_rand, x_val, y_val, x_test, y_test,
-            "random", num_classes, class_names, model_name, num_epochs, batch_size, logger,
-            has_negative_label=has_negative_label, negative_class_name=negative_label_name)
+            x_train=x_rand, train_labels=y_rand, x_val=x_val, val_labels=y_val, 
+            x_test=x_test, test_labels=y_test,
+            label="random", num_classes=num_classes, class_names=class_names, model_name=model_name, 
+            num_epochs=num_epochs, batch_size=batch_size, logger=logger,
+            has_negative_label=has_negative_label, negative_class_name=negative_label_name, 
+            use_pretrained=use_pretrained,)
 
     else:
         raise ValueError(f"Unknown task: {task!r}, choose from 'phase_classification', 'segmentation'")
